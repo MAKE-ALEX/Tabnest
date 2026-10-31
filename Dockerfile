@@ -13,8 +13,8 @@ RUN if [ -n "$DEBIAN_MIRROR" ]; then \
             fi; \
         done; \
     fi \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends pkg-config libssl-dev build-essential \
+    && apt-get -o Acquire::Retries=3 update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libssl-dev build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Compile dependencies first so source edits do not rebuild the world.
@@ -52,8 +52,8 @@ RUN if [ -n "$DEBIAN_MIRROR" ]; then \
             fi; \
         done; \
     fi \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libssl3 curl util-linux \
+    && apt-get -o Acquire::Retries=3 update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates libssl3 curl util-linux tzdata \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home-dir /data --shell /usr/sbin/nologin tabnest \
     && mkdir -p /data/favicons \

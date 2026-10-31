@@ -1,5 +1,6 @@
 target
 data
+docs
 .git
 .gitignore
 .env
