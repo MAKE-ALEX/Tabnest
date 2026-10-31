@@ -47,6 +47,17 @@
     { id: 'auto', name: '跟随系统' },
   ];
 
+  const COLUMN_OPTIONS = [
+    { id: 'auto', name: '自动' },
+    { id: '2', name: '2' },
+    { id: '3', name: '3' },
+    { id: '4', name: '4' },
+    { id: '5', name: '5' },
+    { id: '6', name: '6' },
+    { id: '7', name: '7' },
+    { id: '8', name: '8' },
+  ];
+
   const state = {
     boards: [],
     activeId: null,
@@ -56,6 +67,7 @@
     menuEl: null,
     mode: 'auto',
     palette: 'clay',
+    columns: 'auto',
     appearanceEl: null,
   };
 
@@ -67,6 +79,9 @@
     overColumnEl: null,
     overBoard: null,
     suppressClickUntil: 0,
+    lastX: null,
+    lastY: null,
+    scrollFrame: 0,
   };
 
   const els = {
@@ -199,6 +214,7 @@
     const requestedPalette = params.get('palette');
     const storedTheme = localStorage.getItem('tabnest.theme');
     const storedPalette = localStorage.getItem('tabnest.palette');
+    const storedColumns = localStorage.getItem('tabnest.columns');
 
     const mode = MODES.some((item) => item.id === requestedTheme)
       ? requestedTheme
@@ -208,6 +224,10 @@
       : (PALETTES.some((item) => item.id === storedPalette) ? storedPalette : 'clay');
 
     applyAppearance(mode, palette, !requestedTheme && !requestedPalette);
+    applyColumns(
+      COLUMN_OPTIONS.some((item) => item.id === storedColumns) ? storedColumns : 'auto',
+      false
+    );
 
     try {
       const session = await api('/api/session');
@@ -338,7 +358,17 @@
     if (!els.themeBtn) return;
     const palette = paletteById(state.palette);
     const mode = MODES.find((item) => item.id === state.mode) || MODES[2];
-    els.themeBtn.title = `外观：${palette.name} · ${mode.name}`;
+    const columns = state.columns === 'auto' ? '自动列数' : `${state.columns} 列`;
+    els.themeBtn.title = `外观：${palette.name} · ${mode.name} · ${columns}`;
+  }
+
+  function applyColumns(value, persist = true) {
+    const valid = COLUMN_OPTIONS.some((item) => item.id === value) ? value : 'auto';
+    state.columns = valid;
+    document.documentElement.dataset.columns = valid;
+    if (persist) localStorage.setItem('tabnest.columns', valid);
+    updateAppearanceButton();
+    syncAppearancePanel();
   }
 
   function openAppearance(anchor) {
@@ -378,7 +408,16 @@
           ).join('')}
         </div>
       </div>
-      <p class="appearance-hint">只保存在当前浏览器</p>`;
+      <div class="appearance-section">
+        <span class="appearance-label">列数</span>
+        <div class="column-choices">
+          ${COLUMN_OPTIONS.map(
+            (option) =>
+              `<button type="button" data-cols="${option.id}" aria-pressed="false" aria-label="${option.id === 'auto' ? '自动列数' : `${option.id} 列`}">${esc(option.name)}</button>`
+          ).join('')}
+        </div>
+      </div>
+      <p class="appearance-hint">外观与列数只保存在当前浏览器</p>`;
 
     document.body.appendChild(element);
     state.appearanceEl = element;
@@ -402,9 +441,14 @@
         applyAppearance(modeButton.dataset.mode, state.palette);
         return;
       }
-      const paletteButton = event.target.closest('[data-palette]');
+      const paletteButton = event.target.closest('button[data-palette]');
       if (paletteButton) {
         applyAppearance(state.mode, paletteButton.dataset.palette);
+        return;
+      }
+      const columnsButton = event.target.closest('button[data-cols]');
+      if (columnsButton) {
+        applyColumns(columnsButton.dataset.cols);
       }
     });
 
@@ -437,6 +481,11 @@
     });
     $$('[data-palette]', element).forEach((button) => {
       const active = button.dataset.palette === state.palette;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', String(active));
+    });
+    $$('[data-cols]', element).forEach((button) => {
+      const active = button.dataset.cols === state.columns;
       button.classList.toggle('active', active);
       button.setAttribute('aria-pressed', String(active));
     });
@@ -1305,6 +1354,7 @@
   }
 
   function cleanupDrag() {
+    stopAutoScroll();
     clearIndicators();
     $$('.is-dragging').forEach((el) => el.classList.remove('is-dragging'));
     drag.payload = null;
@@ -1313,6 +1363,82 @@
     drag.overColumn = null;
     drag.overColumnEl = null;
     drag.overBoard = null;
+    drag.lastX = null;
+    drag.lastY = null;
+  }
+
+  function stopAutoScroll() {
+    if (drag.scrollFrame) {
+      window.cancelAnimationFrame(drag.scrollFrame);
+      drag.scrollFrame = 0;
+    }
+  }
+
+  function startAutoScroll() {
+    if (drag.scrollFrame || !drag.payload || drag.payload.type === 'board') return;
+    drag.scrollFrame = window.requestAnimationFrame(autoScrollTick);
+  }
+
+  function autoScrollTick() {
+    drag.scrollFrame = 0;
+    if (!drag.payload || drag.lastY === null) return;
+    const scroller = document.querySelector('.main');
+    if (!scroller) return;
+    const rect = scroller.getBoundingClientRect();
+    if (drag.lastX < rect.left || drag.lastX > rect.right) {
+      drag.scrollFrame = window.requestAnimationFrame(autoScrollTick);
+      return;
+    }
+    const edge = Math.max(56, Math.min(110, rect.height * 0.14));
+    let speed = 0;
+    if (drag.lastY < rect.top + edge) {
+      speed = -Math.ceil(((rect.top + edge - drag.lastY) / edge) * 20);
+    } else if (drag.lastY > rect.bottom - edge) {
+      speed = Math.ceil(((drag.lastY - (rect.bottom - edge)) / edge) * 20);
+    }
+    if (speed !== 0) {
+      const before = scroller.scrollTop;
+      scroller.scrollTop += speed;
+      if (scroller.scrollTop !== before) {
+        refreshDragTargetAtPoint(drag.lastX, drag.lastY);
+      }
+    }
+    if (drag.payload) {
+      drag.scrollFrame = window.requestAnimationFrame(autoScrollTick);
+    }
+  }
+
+  function refreshDragTargetAtPoint(x, y) {
+    if (!drag.payload || drag.payload.type === 'board') return;
+    const node = document.elementFromPoint(x, y);
+    if (!node) return;
+
+    if (drag.payload.type === 'column') {
+      const column = node.closest('.column');
+      if (!column || column === drag.el || !els.boardView.contains(column)) return;
+      clearIndicators();
+      const rect = column.getBoundingClientRect();
+      column.classList.add(
+        y < rect.top + rect.height / 2 ? 'drop-before' : 'drop-after'
+      );
+      drag.overColumnEl = column;
+      return;
+    }
+
+    const card = node.closest('.link-card');
+    const body = node.closest('.column-body');
+    if (card && card !== drag.el) {
+      clearIndicators();
+      const rect = card.getBoundingClientRect();
+      card.classList.add(y < rect.top + rect.height / 2 ? 'drop-before' : 'drop-after');
+      drag.overCard = card;
+      drag.overColumn = null;
+    } else if (body) {
+      clearIndicators();
+      body.classList.add('drop-active');
+      drag.overCard = null;
+      drag.overColumn = body;
+    }
   }
 
   function insertionIndex(body, clientY) {
@@ -1337,9 +1463,12 @@
       drag.payload = { type: 'link', id: Number(card.dataset.linkId), columnId: Number(card.dataset.columnId) };
       drag.el = card;
       drag.suppressClickUntil = Date.now() + 400;
+      drag.lastX = event.clientX;
+      drag.lastY = event.clientY;
       event.dataTransfer.effectAllowed = 'move';
       event.dataTransfer.setData('text/plain', `link:${drag.payload.id}`);
       window.requestAnimationFrame(() => card.classList.add('is-dragging'));
+      startAutoScroll();
       return;
     }
 
@@ -1352,6 +1481,8 @@
       if (!column) return;
       drag.payload = { type: 'column', id: Number(column.dataset.columnId) };
       drag.el = column;
+      drag.lastX = event.clientX;
+      drag.lastY = event.clientY;
       event.dataTransfer.effectAllowed = 'move';
       event.dataTransfer.setData('text/plain', `column:${drag.payload.id}`);
       window.requestAnimationFrame(() => column.classList.add('is-dragging'));
@@ -1360,6 +1491,7 @@
       } catch (error) {
         /* not supported everywhere */
       }
+      startAutoScroll();
       return;
     }
 
@@ -1378,6 +1510,9 @@
 
   function onDragOver(event) {
     if (!drag.payload) return;
+    drag.lastX = event.clientX;
+    drag.lastY = event.clientY;
+    startAutoScroll();
 
     if (drag.payload.type === 'link') {
       const card = event.target.closest('.link-card');
@@ -1432,28 +1567,45 @@
   async function onDrop(event) {
     if (!drag.payload) return;
     event.preventDefault();
+    stopAutoScroll();
     const payload = drag.payload;
 
     try {
       if (payload.type === 'link') {
-        const body = drag.overColumn || drag.overCard?.closest('.column-body');
+        const point = document.elementFromPoint(event.clientX, event.clientY) || event.target;
+        const pointCard = point.closest('.link-card');
+        const pointBody = point.closest('.column-body');
+        const targetCard =
+          pointCard && pointCard !== drag.el
+            ? pointCard
+            : drag.overCard && drag.overCard !== drag.el
+              ? drag.overCard
+              : null;
+        const body =
+          targetCard?.closest('.column-body') ||
+          pointBody ||
+          drag.overColumn ||
+          drag.overCard?.closest('.column-body');
         if (!body) return;
         const targetColumnId = Number(body.dataset.columnId);
         let index = insertionIndex(body, event.clientY);
-        if (drag.overCard) {
+        if (targetCard) {
           const cards = Array.from(body.querySelectorAll('.link-card')).filter((card) => card !== drag.el);
-          const cardIndex = cards.indexOf(drag.overCard);
+          const cardIndex = cards.indexOf(targetCard);
           if (cardIndex >= 0) {
-            const rect = drag.overCard.getBoundingClientRect();
+            const rect = targetCard.getBoundingClientRect();
             index = event.clientY < rect.top + rect.height / 2 ? cardIndex : cardIndex + 1;
           }
         }
         await moveLink(payload.id, payload.columnId, targetColumnId, index);
       } else if (payload.type === 'column') {
-        if (!drag.overColumnEl) return;
-        const rect = drag.overColumnEl.getBoundingClientRect();
+        const point = document.elementFromPoint(event.clientX, event.clientY) || event.target;
+        const targetColumn =
+          point.closest('.column') || event.target.closest('.column') || drag.overColumnEl;
+        if (!targetColumn || targetColumn === drag.el) return;
+        const rect = targetColumn.getBoundingClientRect();
         const before = event.clientY < rect.top + rect.height / 2;
-        await moveColumn(payload.id, Number(drag.overColumnEl.dataset.columnId), before);
+        await moveColumn(payload.id, Number(targetColumn.dataset.columnId), before);
       } else if (payload.type === 'board') {
         if (!drag.overBoard) return;
         const rect = drag.overBoard.getBoundingClientRect();
