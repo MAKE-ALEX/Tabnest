@@ -69,6 +69,7 @@ docker compose up -d --build
 | `TZ` | `Asia/Shanghai` | 时区 |
 
 > 如果直接运行二进制，需要在 `.env` 中确认 `DATA_DIR` 与 `DB_PATH` 指向可写目录。
+> 修改 `APP_PASSWORD` / `PORT` 后执行 `docker compose up -d` 让容器重建生效。
 
 ## 不用 Docker
 
