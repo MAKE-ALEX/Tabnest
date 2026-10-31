@@ -1,0 +1,17 @@
+{
+  "name": "Tabnest · 个人书签面板",
+  "short_name": "Tabnest",
+  "description": "自托管的个人书签起始页",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f2ed",
+  "theme_color": "#c8552f",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

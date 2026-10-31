@@ -1,0 +1,29 @@
+[package]
+name = "tabnest"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A self-hosted, Papaly-style personal bookmark start page"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+axum = "0.8"
+hex = "0.4"
+regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "gzip", "brotli"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "fs", "time"] }
+tower-http = { version = "0.6", features = ["compression-gzip"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
