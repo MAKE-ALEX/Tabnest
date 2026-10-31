@@ -156,6 +156,7 @@ docker compose ps
 | `TZ` | `Asia/Shanghai` | 时区；容器内已安装 tzdata |
 
 > `DATA_DIR` / `DB_PATH` 是容器内路径，不是宿主机路径。宿主机数据目录由 Compose 的 `./data:/data` 决定。
+> 密码包含 `#`、`$`、空格等字符时用单引号包住，例如 `APP_PASSWORD='p@ss#...'`。
 > 修改 `APP_PASSWORD`、`PORT`、`BIND_HOST` 后执行 `docker compose up -d` 让容器重建生效。
 
 ## 不用 Docker

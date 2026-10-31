@@ -18,6 +18,9 @@ services:
       COOKIE_SECURE: "${COOKIE_SECURE:-}"
       TRUST_PROXY: "${TRUST_PROXY:-}"
       TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
+      BIND_ADDR: "${BIND_ADDR:-0.0.0.0:8080}"
+      DATA_DIR: "${DATA_DIR:-/data}"
+      RUST_LOG: "${RUST_LOG:-tabnest=info,sqlx=warn}"
       TZ: "${TZ:-Asia/Shanghai}"
     volumes:
       - ./data:/data
