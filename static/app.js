@@ -28,7 +28,24 @@
     grid: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="18" rx="2"/><rect x="14" y="3" width="7" height="10" rx="2"/></svg>',
     folder:
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>',
+    check:
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.2 4.2L19 6.5"/></svg>',
   };
+
+  const PALETTES = [
+    { id: 'clay', name: '陶土', swatch: '#c0562f' },
+    { id: 'moss', name: '苔绿', swatch: '#4f7346' },
+    { id: 'ocean', name: '海蓝', swatch: '#2f6f8f' },
+    { id: 'plum', name: '紫藤', swatch: '#7a4f86' },
+    { id: 'sakura', name: '樱粉', swatch: '#b34f68' },
+    { id: 'amber', name: '琥珀', swatch: '#8a6a2f' },
+  ];
+
+  const MODES = [
+    { id: 'light', name: '浅色' },
+    { id: 'dark', name: '深色' },
+    { id: 'auto', name: '跟随系统' },
+  ];
 
   const state = {
     boards: [],
@@ -37,6 +54,9 @@
     authRequired: false,
     version: '0.1.0',
     menuEl: null,
+    mode: 'auto',
+    palette: 'clay',
+    appearanceEl: null,
   };
 
   const drag = {
@@ -166,9 +186,20 @@
 
   async function boot() {
     bindStatic();
-    const requestedTheme = new URLSearchParams(window.location.search).get('theme');
-    const useUrlTheme = requestedTheme === 'dark' || requestedTheme === 'light';
-    applyTheme(useUrlTheme ? requestedTheme : localStorage.getItem('tabnest.theme'), !useUrlTheme);
+    const params = new URLSearchParams(window.location.search);
+    const requestedTheme = params.get('theme');
+    const requestedPalette = params.get('palette');
+    const storedTheme = localStorage.getItem('tabnest.theme');
+    const storedPalette = localStorage.getItem('tabnest.palette');
+
+    const mode = MODES.some((item) => item.id === requestedTheme)
+      ? requestedTheme
+      : (MODES.some((item) => item.id === storedTheme) ? storedTheme : 'auto');
+    const palette = PALETTES.some((item) => item.id === requestedPalette)
+      ? requestedPalette
+      : (PALETTES.some((item) => item.id === storedPalette) ? storedPalette : 'clay');
+
+    applyAppearance(mode, palette, !requestedTheme && !requestedPalette);
 
     try {
       const session = await api('/api/session');
@@ -191,6 +222,7 @@
 
   function showLogin() {
     closeMenu();
+    closeAppearance();
     if (!els.modalLayer.hidden) closeModal();
     els.loginLayer.hidden = false;
     $('#boot')?.remove();
@@ -239,32 +271,150 @@
   }
 
   /* ----------------------------------------------------------
-     Theme
+     Appearance
      ---------------------------------------------------------- */
 
-  function resolvedTheme(value) {
-    if (value === 'dark' || value === 'light') return value;
+  function systemTheme() {
     return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   }
 
-  function applyTheme(value, persist = true) {
-    const theme = resolvedTheme(value);
+  function paletteById(id) {
+    return PALETTES.find((item) => item.id === id) || PALETTES[0];
+  }
+
+  function applyAppearance(mode, palette, persist = true) {
+    state.mode = MODES.some((item) => item.id === mode) ? mode : 'auto';
+    state.palette = PALETTES.some((item) => item.id === palette) ? palette : 'clay';
+    const theme = state.mode === 'auto' ? systemTheme() : state.mode;
+
     document.documentElement.dataset.theme = theme;
-    if (persist) localStorage.setItem('tabnest.theme', theme);
+    document.documentElement.dataset.palette = state.palette;
+
+    if (persist) {
+      localStorage.setItem('tabnest.theme', state.mode);
+      localStorage.setItem('tabnest.palette', state.palette);
+    }
+
     const meta = document.querySelector('meta[name="theme-color"]');
-    if (meta) meta.setAttribute('content', theme === 'dark' ? '#161514' : '#f3f1ec');
-    updateThemeButton(theme);
+    if (meta) {
+      const background = getComputedStyle(document.documentElement)
+        .getPropertyValue('--bg')
+        .trim();
+      if (background) meta.setAttribute('content', background);
+    }
+
+    updateAppearanceButton();
+    syncAppearancePanel();
   }
 
-  function toggleTheme() {
-    applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
-  }
-
-  function updateThemeButton(theme) {
+  function updateAppearanceButton() {
     if (!els.themeBtn) return;
-    const icon = theme === 'dark' ? SVG.sun : SVG.moon;
-    els.themeBtn.innerHTML = `${icon}<span class="foot-label">主题</span>`;
-    els.themeBtn.title = theme === 'dark' ? '切换到浅色主题' : '切换到深色主题';
+    const palette = paletteById(state.palette);
+    const mode = MODES.find((item) => item.id === state.mode) || MODES[2];
+    els.themeBtn.title = `外观：${palette.name} · ${mode.name}`;
+  }
+
+  function openAppearance(anchor) {
+    if (state.appearanceEl) {
+      closeAppearance();
+      return;
+    }
+    closeMenu();
+
+    const element = document.createElement('div');
+    element.className = 'appearance-pop';
+    element.setAttribute('role', 'dialog');
+    element.setAttribute('aria-label', '外观设置');
+    element.innerHTML = `
+      <div class="appearance-head">
+        <strong>外观</strong>
+        <button type="button" class="icon-btn" data-close-appearance aria-label="关闭">${SVG.x}</button>
+      </div>
+      <div class="appearance-section">
+        <span class="appearance-label">亮度</span>
+        <div class="segmented">
+          ${MODES.map(
+            (mode) =>
+              `<button type="button" data-mode="${mode.id}" aria-pressed="false">${esc(mode.name)}</button>`
+          ).join('')}
+        </div>
+      </div>
+      <div class="appearance-section">
+        <span class="appearance-label">配色</span>
+        <div class="palette-grid">
+          ${PALETTES.map(
+            (palette) => `<button type="button" class="palette" data-palette="${palette.id}" aria-pressed="false" title="${attr(palette.name)}">
+              <span class="swatch" style="--sw:${palette.swatch}"></span>
+              <span>${esc(palette.name)}</span>
+              <span class="palette-check">${SVG.check}</span>
+            </button>`
+          ).join('')}
+        </div>
+      </div>
+      <p class="appearance-hint">只保存在当前浏览器</p>`;
+
+    document.body.appendChild(element);
+    state.appearanceEl = element;
+
+    const rect = anchor.getBoundingClientRect();
+    const width = element.offsetWidth;
+    const height = element.offsetHeight;
+    const sidebarLeft = els.sidebar.getBoundingClientRect().left;
+    let left = Math.max(12, sidebarLeft + 12);
+    left = Math.min(left, window.innerWidth - width - 12);
+    let top = rect.top - height - 8;
+    if (top < 12) top = Math.min(rect.bottom + 8, window.innerHeight - height - 12);
+    element.style.left = `${left}px`;
+    element.style.top = `${top}px`;
+
+    element.addEventListener('click', (event) => {
+      if (event.target.closest('[data-close-appearance]')) {
+        closeAppearance();
+        return;
+      }
+      const modeButton = event.target.closest('[data-mode]');
+      if (modeButton) {
+        applyAppearance(modeButton.dataset.mode, state.palette);
+        return;
+      }
+      const paletteButton = event.target.closest('[data-palette]');
+      if (paletteButton) {
+        applyAppearance(state.mode, paletteButton.dataset.palette);
+      }
+    });
+
+    const outside = (event) => {
+      if (element.contains(event.target) || event.target.closest('#btn-theme')) return;
+      closeAppearance();
+    };
+    element._outside = outside;
+    window.setTimeout(() => document.addEventListener('click', outside), 0);
+
+    syncAppearancePanel();
+  }
+
+  function closeAppearance() {
+    const element = state.appearanceEl;
+    if (!element) return;
+    if (element._outside) document.removeEventListener('click', element._outside);
+    element.remove();
+    state.appearanceEl = null;
+  }
+
+  function syncAppearancePanel() {
+    const element = state.appearanceEl;
+    if (!element) return;
+
+    $$('[data-mode]', element).forEach((button) => {
+      const active = button.dataset.mode === state.mode;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', String(active));
+    });
+    $$('[data-palette]', element).forEach((button) => {
+      const active = button.dataset.palette === state.palette;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', String(active));
+    });
   }
 
   /* ----------------------------------------------------------
@@ -668,6 +818,7 @@
 
   function openMenu(anchor, items) {
     const wasOpen = anchor.dataset.menuOpen === '1';
+    closeAppearance();
     closeMenu();
     if (wasOpen) return;
 
@@ -834,6 +985,7 @@
     els.modalLayer.innerHTML = html;
     els.modalLayer.hidden = false;
     closeMenu();
+    closeAppearance();
   }
 
   function closeModal() {
@@ -1474,9 +1626,14 @@
     els.loginForm.addEventListener('submit', onLogin);
     $('#btn-new-board').addEventListener('click', startNewBoard);
     $('#btn-import').addEventListener('click', openImportDialog);
-    els.themeBtn.addEventListener('click', toggleTheme);
+    els.themeBtn.addEventListener('click', () => openAppearance(els.themeBtn));
     els.logoutBtn.addEventListener('click', logout);
     els.scrim.addEventListener('click', closeSidebar);
+
+    const scheme = window.matchMedia('(prefers-color-scheme: dark)');
+    scheme.addEventListener('change', () => {
+      if (state.mode === 'auto') applyAppearance('auto', state.palette, false);
+    });
 
     let searchTimer = null;
     els.search.addEventListener('input', () => {
@@ -1524,6 +1681,10 @@
 
     document.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
+        if (state.appearanceEl) {
+          closeAppearance();
+          return;
+        }
         if (state.menuEl) {
           closeMenu();
           return;
@@ -1567,8 +1728,14 @@
       }
     }, true);
 
-    document.addEventListener('scroll', closeMenu, true);
-    window.addEventListener('resize', closeMenu);
+    document.addEventListener('scroll', () => {
+      closeMenu();
+      closeAppearance();
+    }, true);
+    window.addEventListener('resize', () => {
+      closeMenu();
+      closeAppearance();
+    });
   }
 
   if (document.readyState === 'loading') {
