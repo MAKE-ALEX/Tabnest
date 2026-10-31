@@ -41,6 +41,10 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
         );
+        headers.insert(
+            HeaderName::from_static("cdn-cache-control"),
+            HeaderValue::from_static("no-store"),
+        );
     }
 
     if !headers.contains_key(header::CONTENT_SECURITY_POLICY) {

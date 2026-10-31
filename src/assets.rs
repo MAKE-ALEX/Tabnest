@@ -1,5 +1,5 @@
 use axum::{
-    http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -33,6 +33,10 @@ fn text_response(body: &'static str, content_type: &'static str) -> Response {
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     headers.insert(
         header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    headers.insert(
+        HeaderName::from_static("cdn-cache-control"),
         HeaderValue::from_static("no-store"),
     );
     headers.insert(
