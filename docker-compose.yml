@@ -17,6 +17,7 @@ services:
       ALLOW_PRIVATE_NETWORK: "${ALLOW_PRIVATE_NETWORK:-}"
       COOKIE_SECURE: "${COOKIE_SECURE:-}"
       TRUST_PROXY: "${TRUST_PROXY:-}"
+      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
       TZ: "${TZ:-Asia/Shanghai}"
     volumes:
       - ./data:/data

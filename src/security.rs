@@ -10,7 +10,7 @@ use crate::error::AppError;
 
 const CSP: &str = "default-src 'self'; \
                    script-src 'self'; \
-                   style-src 'self' 'unsafe-inline'; \
+                   style-src 'self'; \
                    img-src 'self' data:; \
                    font-src 'self'; \
                    connect-src 'self'; \
@@ -24,6 +24,8 @@ const PERMISSIONS_POLICY: &str =
 
 /// Security headers for every response, including static assets and errors.
 pub async fn security_headers(request: Request, next: Next) -> Response {
+    let path = request.uri().path().to_string();
+    let is_api = path.starts_with("/api/");
     let forwarded_https = request
         .headers()
         .get("x-forwarded-proto")
@@ -33,6 +35,13 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
 
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
+
+    if is_api && path != "/api/favicon" {
+        headers.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        );
+    }
 
     if !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
         headers.insert(

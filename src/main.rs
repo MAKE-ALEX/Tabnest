@@ -1,5 +1,3 @@
-#![forbid(unsafe_code)]
-
 mod api;
 mod assets;
 mod auth;
@@ -48,9 +46,9 @@ async fn main() -> anyhow::Result<()> {
 
     let app = api::router(state)
         .merge(assets::router())
+        .fallback(assets::not_found)
         .layer(CompressionLayer::new())
-        .layer(middleware::from_fn(security::security_headers))
-        .fallback(assets::not_found);
+        .layer(middleware::from_fn(security::security_headers));
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind)
         .await
@@ -67,6 +65,11 @@ async fn main() -> anyhow::Result<()> {
     }
     if cfg.allow_private_network {
         tracing::warn!("ALLOW_PRIVATE_NETWORK 已启用：服务端可请求内网地址");
+    }
+    if cfg.trust_proxy {
+        tracing::warn!(
+            "TRUST_PROXY 已启用：会信任任意对端的转发头，建议改用 TRUSTED_PROXIES 限定代理网段"
+        );
     }
 
     axum::serve(

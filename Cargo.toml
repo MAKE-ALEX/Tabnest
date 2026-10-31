@@ -10,6 +10,7 @@ license = "MIT"
 anyhow = "1.0"
 axum = "0.8"
 hex = "0.4"
+ipnet = "2"
 regex = "1.11"
 reqwest = { version = "0.12", default-features = false, features = ["native-tls", "gzip", "brotli"] }
 serde = { version = "1", features = ["derive"] }

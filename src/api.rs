@@ -194,7 +194,12 @@ async fn login(
         return Ok(Json(json!({ "ok": true })).into_response());
     };
 
-    let ip = auth::client_ip(peer, &headers, state.cfg.trust_proxy);
+    let ip = auth::client_ip(
+        peer,
+        &headers,
+        &state.cfg.trusted_proxies,
+        state.cfg.trust_proxy,
+    );
     if body.password.len() > 256 {
         return Err(AppError::unauthorized("密码不正确"));
     }
@@ -251,7 +256,10 @@ fn too_many_response(retry_after: Duration) -> Response {
 }
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Some(token) = auth::extract_cookie(&headers, auth::COOKIE_NAME) {
+    if let Some(token) = auth::extract_cookie(
+        &headers,
+        auth::cookie_name(state.cfg.cookie_secure),
+    ) {
         auth::drop_session(&state, &token);
     }
     let mut response = Json(json!({ "ok": true })).into_response();
@@ -774,8 +782,9 @@ fn image_response(bytes: Vec<u8>, content_type: &'static str) -> Response {
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     headers.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=604800, immutable"),
+        HeaderValue::from_static("private, max-age=604800, immutable"),
     );
+    headers.append(header::VARY, HeaderValue::from_static("Cookie"));
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
