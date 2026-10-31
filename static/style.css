@@ -2709,8 +2709,20 @@ body::before {
   gap: 7px;
   padding: 9px 9px 8px 10px;
   border-bottom: 1px solid var(--card-line);
-  cursor: default;
+  cursor: grab;
   user-select: none;
+}
+
+.column-head:active {
+  cursor: grabbing;
+}
+
+.column.drop-before {
+  box-shadow: 0 -3px 0 var(--cat, var(--accent)), var(--glass-shadow);
+}
+
+.column.drop-after {
+  box-shadow: 0 3px 0 var(--cat, var(--accent)), var(--glass-shadow);
 }
 
 .column-title {

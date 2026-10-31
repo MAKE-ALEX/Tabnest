@@ -568,7 +568,7 @@
 
   function renderColumn(column) {
     return `<section class="column ${categoryColor(column.name)}" data-column-id="${column.id}">
-      <header class="column-head" data-column-id="${column.id}" title="${attr(column.name)}">
+      <header class="column-head" draggable="true" data-column-id="${column.id}" title="拖动排序" aria-label="拖动排序：${attr(column.name)}">
         <h2 class="column-title">${esc(column.name)}</h2>
         <span class="column-count">${column.links.length}</span>
         <div class="column-tools">
@@ -1408,7 +1408,9 @@
         event.dataTransfer.dropEffect = 'move';
         clearIndicators();
         const rect = column.getBoundingClientRect();
-        column.classList.add(event.clientX < rect.left + rect.width / 2 ? 'drop-left' : 'drop-right');
+        column.classList.add(
+          event.clientY < rect.top + rect.height / 2 ? 'drop-before' : 'drop-after'
+        );
         drag.overColumnEl = column;
       }
       return;
@@ -1450,7 +1452,7 @@
       } else if (payload.type === 'column') {
         if (!drag.overColumnEl) return;
         const rect = drag.overColumnEl.getBoundingClientRect();
-        const before = event.clientX < rect.left + rect.width / 2;
+        const before = event.clientY < rect.top + rect.height / 2;
         await moveColumn(payload.id, Number(drag.overColumnEl.dataset.columnId), before);
       } else if (payload.type === 'board') {
         if (!drag.overBoard) return;
