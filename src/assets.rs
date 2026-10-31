@@ -11,6 +11,7 @@ const APP_JS: &str = include_str!("../static/app.js");
 const THEME_INIT_JS: &str = include_str!("../static/theme-init.js");
 const STYLE_CSS: &str = include_str!("../static/style.css");
 const FAVICON_SVG: &str = include_str!("../static/favicon.svg");
+const WALLPAPER: &[u8] = include_bytes!("../static/wallpaper.jpg");
 const MANIFEST: &str = include_str!("../static/manifest.webmanifest");
 
 pub fn router() -> Router {
@@ -21,6 +22,7 @@ pub fn router() -> Router {
         .route("/theme-init.js", get(theme_init_js))
         .route("/style.css", get(style_css))
         .route("/favicon.svg", get(favicon))
+        .route("/wallpaper.jpg", get(wallpaper))
         .route("/manifest.webmanifest", get(manifest))
         .route("/robots.txt", get(robots))
         .route("/healthz", get(health))
@@ -31,7 +33,7 @@ fn text_response(body: &'static str, content_type: &'static str) -> Response {
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     headers.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("no-cache, must-revalidate"),
+        HeaderValue::from_static("no-store"),
     );
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
@@ -64,6 +66,16 @@ async fn favicon() -> Response {
         HeaderValue::from_static("public, max-age=86400"),
     );
     (headers, FAVICON_SVG).into_response()
+}
+
+async fn wallpaper() -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("image/jpeg"));
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=604800, immutable"),
+    );
+    (headers, WALLPAPER).into_response()
 }
 
 async fn manifest() -> Response {
