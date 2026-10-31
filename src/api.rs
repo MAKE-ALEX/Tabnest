@@ -1,11 +1,13 @@
 use std::{
     collections::HashMap,
+    net::SocketAddr,
+    path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
-    extract::{DefaultBodyLimit, Path, Query, State},
-    http::{header, HeaderMap, HeaderValue},
+    extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware,
     response::{IntoResponse, Response},
     routing::{get, patch, post, put},
@@ -17,7 +19,7 @@ use sha1::{Digest, Sha1};
 use sqlx::SqlitePool;
 
 use crate::{
-    auth::{self, clear_cookie, constant_time_eq, session_cookie},
+    auth::{self, clear_cookie, constant_time_eq, session_cookie, LoginCheck},
     error::{AppError, AppResult},
     fetch::{
         fetch_limited, fetch_meta, host_label, normalize_url, sniff_image, truncate_chars,
@@ -61,6 +63,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/logout", post(logout))
         .merge(protected)
         .layer(DefaultBodyLimit::max(25 * 1024 * 1024))
+        .layer(middleware::from_fn(crate::security::csrf_guard))
         .with_state(state)
 }
 
@@ -173,7 +176,6 @@ async fn session_info(State(state): State<AppState>, headers: HeaderMap) -> Json
     Json(json!({
         "auth_required": state.cfg.password.is_some(),
         "authenticated": auth::is_authenticated(&state, &headers),
-        "version": state.cfg.version,
     }))
 }
 
@@ -184,21 +186,68 @@ struct LoginRequest {
 
 async fn login(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> AppResult<Response> {
     let Some(expected) = state.cfg.password.as_deref() else {
         return Ok(Json(json!({ "ok": true })).into_response());
     };
-    if !constant_time_eq(body.password.trim(), expected) {
-        tokio::time::sleep(Duration::from_millis(450)).await;
+
+    let ip = auth::client_ip(peer, &headers, state.cfg.trust_proxy);
+    if body.password.len() > 256 {
         return Err(AppError::unauthorized("密码不正确"));
     }
+    let lockout = {
+        let Ok(mut limiter) = state.login_limiter.lock() else {
+            return Err(AppError::internal("登录限速器不可用"));
+        };
+        match limiter.check(ip) {
+            LoginCheck::Allowed => None,
+            LoginCheck::Locked(wait) => Some(wait),
+        }
+    };
+    if let Some(wait) = lockout {
+        return Ok(too_many_response(wait));
+    }
+
+    if !constant_time_eq(body.password.trim(), expected) {
+        let locked_for = state
+            .login_limiter
+            .lock()
+            .ok()
+            .and_then(|mut limiter| limiter.record_failure(ip));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        if let Some(wait) = locked_for {
+            return Ok(too_many_response(wait));
+        }
+        return Err(AppError::unauthorized("密码不正确"));
+    }
+
+    if let Ok(mut limiter) = state.login_limiter.lock() {
+        limiter.record_success(ip);
+    }
+
     let token = auth::create_session(&state);
     let mut response = Json(json!({ "ok": true })).into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, session_cookie(&token));
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        session_cookie(&token, state.cfg.cookie_secure),
+    );
     Ok(response)
+}
+
+fn too_many_response(retry_after: Duration) -> Response {
+    let seconds = retry_after.as_secs().max(1);
+    let mut response = (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({ "error": format!("尝试次数过多，请在 {seconds} 秒后重试") })),
+    )
+        .into_response();
+    if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    response
 }
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -206,9 +255,10 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
         auth::drop_session(&state, &token);
     }
     let mut response = Json(json!({ "ok": true })).into_response();
-    response
-        .headers_mut()
-        .insert(header::SET_COOKIE, clear_cookie());
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        clear_cookie(state.cfg.cookie_secure),
+    );
     response
 }
 
@@ -282,6 +332,9 @@ async fn order_boards(
     State(state): State<AppState>,
     Json(body): Json<OrderBoards>,
 ) -> AppResult<Json<Value>> {
+    if body.ids.len() > 1000 {
+        return Err(AppError::bad_request("排序数据过多"));
+    }
     let mut tx = state.pool.begin().await?;
     for (index, id) in body.ids.iter().enumerate() {
         sqlx::query("UPDATE boards SET position = ? WHERE id = ?")
@@ -372,6 +425,9 @@ async fn order_columns(
     State(state): State<AppState>,
     Json(body): Json<OrderColumns>,
 ) -> AppResult<Json<Value>> {
+    if body.ids.len() > 1000 {
+        return Err(AppError::bad_request("排序数据过多"));
+    }
     ensure_board(&state.pool, body.board_id).await?;
     let mut tx = state.pool.begin().await?;
     for (index, id) in body.ids.iter().enumerate() {
@@ -413,9 +469,14 @@ async fn create_link(
     let mut icon = clean_icon(body.icon);
 
     if title.is_empty() || icon.is_none() {
-        let meta = tokio::time::timeout(Duration::from_secs(6), fetch_meta(&state.http, &url))
-            .await
-            .unwrap_or_default();
+        let meta = tokio::time::timeout(
+            Duration::from_secs(6),
+            fetch_meta(&url, state.cfg.allow_private_network),
+        )
+        .await
+        .ok()
+        .and_then(|result| result.ok())
+        .unwrap_or_default();
         if title.is_empty() {
             title = meta.title.unwrap_or_else(|| host_label(&url));
         }
@@ -588,6 +649,10 @@ async fn arrange_links(
     State(state): State<AppState>,
     Json(body): Json<ArrangeLinks>,
 ) -> AppResult<Json<Value>> {
+    let total: usize = body.columns.iter().map(|column| column.link_ids.len()).sum();
+    if body.columns.len() > 500 || total > 5000 {
+        return Err(AppError::bad_request("排序数据过多"));
+    }
     let mut tx = state.pool.begin().await?;
     for column in &body.columns {
         ensure_column(&state.pool, column.column_id).await?;
@@ -619,9 +684,16 @@ async fn meta_handler(
     Query(query): Query<MetaQuery>,
 ) -> AppResult<Json<Value>> {
     let url = normalize_url(&query.url).map_err(AppError::bad_request)?;
-    let meta = tokio::time::timeout(Duration::from_secs(8), fetch_meta(&state.http, &url))
-        .await
-        .unwrap_or_default();
+    let meta = tokio::time::timeout(
+        Duration::from_secs(8),
+        fetch_meta(&url, state.cfg.allow_private_network),
+    )
+    .await
+    .map_err(|_| AppError::bad_request("抓取网页信息超时"))?
+    .map_err(|error| {
+        tracing::warn!(%error, %url, "metadata fetch rejected or failed");
+        AppError::bad_request("无法抓取该网址的信息（内网地址或访问失败）")
+    })?;
     Ok(Json(json!({
         "title": meta.title,
         "icon": meta.icon,
@@ -641,27 +713,60 @@ async fn favicon_handler(
 ) -> AppResult<Response> {
     let url = normalize_url(&query.u).map_err(AppError::bad_request)?;
     let digest = hex::encode(Sha1::digest(url.as_bytes()));
-    let path = state.cfg.data_dir.join("favicons").join(digest);
+    let cache_dir = state.cfg.data_dir.join("favicons");
+    let path = cache_dir.join(digest);
 
     if let Ok(bytes) = tokio::fs::read(&path).await {
         if let Some(content_type) = sniff_image(&bytes, "") {
             return Ok(image_response(bytes, content_type));
         }
+        // Drop anything that is no longer an accepted raster image (for
+        // example old SVG entries cached before the whitelist changed).
+        let _ = tokio::fs::remove_file(&path).await;
     }
 
-    let (bytes, content_type, _) = fetch_limited(&state.http, &url, 512 * 1024)
-        .await
-        .map_err(|error| {
-            tracing::debug!(%error, %url, "favicon fetch failed");
-            AppError::not_found("图标不可用")
-        })?;
+    let (bytes, content_type, _) =
+        fetch_limited(&url, 512 * 1024, state.cfg.allow_private_network)
+            .await
+            .map_err(|error| {
+                tracing::debug!(%error, %url, "favicon fetch failed");
+                AppError::not_found("图标不可用")
+            })?;
     let Some(kind) = sniff_image(&bytes, &content_type) else {
         return Err(AppError::not_found("图标不是有效的图片"));
     };
     if let Err(error) = tokio::fs::write(&path, &bytes).await {
         tracing::warn!(%error, "favicon cache write failed");
+    } else {
+        prune_favicon_cache(&cache_dir).await;
     }
     Ok(image_response(bytes, kind))
+}
+
+const FAVICON_CACHE_MAX_FILES: usize = 1000;
+
+/// Keep the on-disk favicon cache bounded. Called only on a cache miss.
+async fn prune_favicon_cache(dir: &std::path::Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
+        return;
+    };
+    let mut files: Vec<(SystemTime, PathBuf)> = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if let Ok(metadata) = entry.metadata().await {
+            if metadata.is_file() {
+                let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+                files.push((modified, entry.path()));
+            }
+        }
+    }
+    if files.len() <= FAVICON_CACHE_MAX_FILES {
+        return;
+    }
+    files.sort_by_key(|(modified, _)| *modified);
+    let remove_count = files.len() - FAVICON_CACHE_MAX_FILES;
+    for (_, path) in files.into_iter().take(remove_count) {
+        let _ = tokio::fs::remove_file(path).await;
+    }
 }
 
 fn image_response(bytes: Vec<u8>, content_type: &'static str) -> Response {
@@ -675,6 +780,14 @@ fn image_response(bytes: Vec<u8>, content_type: &'static str) -> Response {
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; sandbox"),
+    );
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("inline; filename=\"favicon\""),
+    );
     (headers, bytes).into_response()
 }
 
@@ -685,6 +798,12 @@ fn image_response(bytes: Vec<u8>, content_type: &'static str) -> Response {
 async fn import_json(State(state): State<AppState>, body: String) -> AppResult<Json<Value>> {
     let boards = import::parse_json(&body)
         .map_err(|error| AppError::bad_request(format!("JSON 解析失败：{error}")))?;
+    if boards.len() > 200 {
+        return Err(AppError::bad_request("面板数量过多（最多 200 个）"));
+    }
+    if boards.iter().map(|board| board.columns.len()).sum::<usize>() > 2000 {
+        return Err(AppError::bad_request("分组数量过多（最多 2000 个）"));
+    }
     let stats = crate::db::import_boards(&state.pool, boards).await?;
     Ok(Json(json!({ "ok": true, "stats": stats })))
 }
@@ -694,6 +813,9 @@ async fn import_html(State(state): State<AppState>, body: String) -> AppResult<J
         return Err(AppError::bad_request("文件太大"));
     }
     let boards = import::parse_netscape(&body);
+    if boards.len() > 500 {
+        return Err(AppError::bad_request("面板数量过多（最多 500 个）"));
+    }
     let stats = crate::db::import_boards(&state.pool, boards).await?;
     Ok(Json(json!({ "ok": true, "stats": stats })))
 }

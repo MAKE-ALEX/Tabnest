@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod api;
 mod assets;
 mod auth;
@@ -6,19 +8,21 @@ mod db;
 mod error;
 mod fetch;
 mod import;
+mod security;
 mod state;
 
 use std::{
     collections::HashMap,
+    net::SocketAddr,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use anyhow::Context;
+use axum::middleware;
 use tower_http::compression::CompressionLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use crate::{config::Config, state::AppState};
+use crate::{auth::LoginLimiter, config::Config, state::AppState};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -31,27 +35,21 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = Arc::new(Config::from_env()?);
+    cfg.validate()?;
     let pool = db::connect(&cfg).await?;
     db::seed_if_empty(&pool, cfg.seed_demo).await?;
-
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .connect_timeout(Duration::from_secs(6))
-        .user_agent(fetch::USER_AGENT)
-        .redirect(reqwest::redirect::Policy::limited(6))
-        .build()
-        .context("无法初始化 HTTP 客户端")?;
 
     let state = AppState {
         pool,
         cfg: cfg.clone(),
-        http,
         sessions: Arc::new(Mutex::new(HashMap::new())),
+        login_limiter: Arc::new(Mutex::new(LoginLimiter::default())),
     };
 
     let app = api::router(state)
         .merge(assets::router())
         .layer(CompressionLayer::new())
+        .layer(middleware::from_fn(security::security_headers))
         .fallback(assets::not_found);
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind)
@@ -67,10 +65,16 @@ async fn main() -> anyhow::Result<()> {
     if cfg.password.is_none() {
         tracing::warn!("未设置 APP_PASSWORD，任何能访问该端口的人都可以查看和修改书签");
     }
+    if cfg.allow_private_network {
+        tracing::warn!("ALLOW_PRIVATE_NETWORK 已启用：服务端可请求内网地址");
+    }
 
-    axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 

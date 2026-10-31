@@ -1,11 +1,17 @@
-use std::sync::OnceLock;
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::OnceLock,
+    time::Duration,
+};
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use regex::Regex;
 use url::Url;
 
 pub const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 Tabnest/0.1";
+
+const MAX_REDIRECTS: usize = 3;
 
 #[derive(Debug, Default, Clone)]
 pub struct PageMeta {
@@ -57,59 +63,162 @@ pub fn attr_value(tag: &str, name: &str) -> Option<String> {
 }
 
 /// Fetch a URL while refusing to buffer more than `limit` bytes.
+///
+/// Redirects are followed manually so every hop is checked against the SSRF
+/// guard, and DNS answers are pinned to the validated addresses.
 pub async fn fetch_limited(
-    client: &reqwest::Client,
     url: &str,
     limit: usize,
+    allow_private: bool,
 ) -> Result<(Vec<u8>, String, String)> {
-    let response = client.get(url).send().await?;
-    let response = response.error_for_status()?;
-    let final_url = response.url().to_string();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .to_lowercase();
+    let mut current = Url::parse(url).context("网址格式不正确")?;
 
-    if let Some(length) = response.content_length() {
-        if length as usize > limit {
-            bail!("response too large: {length} bytes");
+    for _ in 0..=MAX_REDIRECTS {
+        if !matches!(current.scheme(), "http" | "https") {
+            bail!("仅支持 http/https 网址");
         }
+        if !current.username().is_empty() || current.password().is_some() {
+            bail!("网址不能包含用户名或密码");
+        }
+
+        let client = build_guarded_client(&current, allow_private).await?;
+        let response = client.get(current.clone()).send().await?;
+        let status = response.status();
+
+        if matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .context("重定向响应缺少 Location")?;
+            current = current.join(location).context("无效的重定向地址")?;
+            continue;
+        }
+
+        let response = response.error_for_status()?;
+        let final_url = response.url().to_string();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_lowercase();
+
+        if let Some(length) = response.content_length() {
+            if length as usize > limit {
+                bail!("response too large: {length} bytes");
+            }
+        }
+
+        let mut response = response;
+        let mut buffer = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if buffer.len() + chunk.len() > limit {
+                bail!("response too large (> {limit} bytes)");
+            }
+            buffer.extend_from_slice(&chunk);
+        }
+        return Ok((buffer, content_type, final_url));
     }
 
-    let mut response = response;
-    let mut buffer = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        if buffer.len() + chunk.len() > limit {
-            bail!("response too large (> {limit} bytes)");
-        }
-        buffer.extend_from_slice(&chunk);
-    }
-    Ok((buffer, content_type, final_url))
+    bail!("重定向次数过多")
 }
 
-pub async fn fetch_meta(client: &reqwest::Client, url: &str) -> PageMeta {
-    match fetch_limited(client, url, 1_500_000).await {
-        Ok((bytes, content_type, final_url)) => {
-            if !content_type.is_empty()
-                && !content_type.contains("html")
-                && !content_type.contains("text")
-                && !content_type.contains("xml")
-            {
-                return PageMeta::default();
+async fn build_guarded_client(url: &Url, allow_private: bool) -> Result<reqwest::Client> {
+    let host = url.host_str().context("网址缺少域名")?;
+    let port = url.port_or_known_default().context("无法确定网址端口")?;
+    let addresses = resolve_host(host, port).await?;
+    if addresses.is_empty() {
+        bail!("域名解析失败");
+    }
+
+    if !allow_private {
+        for address in &addresses {
+            if is_forbidden_ip(address.ip()) {
+                bail!("出于安全考虑，不允许访问内网或本机地址");
             }
-            let html = String::from_utf8_lossy(&bytes);
-            PageMeta {
-                title: extract_title(&html),
-                icon: extract_icon(&html, &final_url),
-            }
-        }
-        Err(error) => {
-            tracing::debug!(url, %error, "metadata fetch failed");
-            PageMeta::default()
         }
     }
+
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(5))
+        .user_agent(USER_AGENT);
+
+    // Pin the already validated DNS answers so a second lookup cannot be used
+    // to rebind the hostname to a private address.
+    if host.parse::<IpAddr>().is_err() {
+        builder = builder.resolve_to_addrs(host, &addresses);
+    }
+
+    builder.build().context("无法创建 HTTP 客户端")
+}
+
+async fn resolve_host(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return Ok(vec![SocketAddr::new(ip, port)]);
+    }
+    let addresses = tokio::net::lookup_host((host, port))
+        .await
+        .with_context(|| format!("无法解析域名 {host}"))?;
+    Ok(addresses.collect())
+}
+
+/// Reject loopback, private, link-local, CGNAT, multicast, documentation and
+/// otherwise non-public addresses. IPv4-mapped IPv6 addresses are unwrapped.
+pub fn is_forbidden_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_forbidden_v4(v4),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_forbidden_v4(v4);
+            }
+            let segments = v6.segments();
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (segments[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
+                || (segments[0] & 0xffc0) == 0xfe80 // fe80::/10 link local
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8) // documentation
+                || segments[0] == 0x2002 // 6to4
+                || (segments[0] == 0x2001 && segments[1] == 0x0000) // Teredo
+        }
+    }
+}
+
+fn is_forbidden_v4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || octets[0] == 0
+        || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        || (octets[0] == 192 && octets[1] == 88 && octets[2] == 99)
+        || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19))
+        || octets[0] >= 240
+}
+
+pub async fn fetch_meta(url: &str, allow_private: bool) -> Result<PageMeta> {
+    let (bytes, content_type, final_url) = fetch_limited(url, 1_500_000, allow_private).await?;
+    if !content_type.is_empty()
+        && !content_type.contains("html")
+        && !content_type.contains("text")
+        && !content_type.contains("xml")
+    {
+        return Ok(PageMeta::default());
+    }
+    let html = String::from_utf8_lossy(&bytes);
+    Ok(PageMeta {
+        title: extract_title(&html),
+        icon: extract_icon(&html, &final_url),
+    })
 }
 
 pub fn extract_title(html: &str) -> Option<String> {
@@ -251,6 +360,9 @@ pub fn decode_entities(input: &str) -> String {
 }
 
 /// Detect an image type from magic bytes (used for the favicon proxy).
+///
+/// SVG is deliberately excluded: serving attacker-controlled SVG from the app
+/// origin would turn the favicon proxy into a same-origin XSS vector.
 pub fn sniff_image(bytes: &[u8], content_type: &str) -> Option<&'static str> {
     if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
         return Some("image/png");
@@ -267,18 +379,13 @@ pub fn sniff_image(bytes: &[u8], content_type: &str) -> Option<&'static str> {
     if bytes.starts_with(&[0x00, 0x00, 0x01, 0x00]) {
         return Some("image/x-icon");
     }
-    let head = &bytes[..bytes.len().min(512)];
-    let text = String::from_utf8_lossy(head).trim_start().to_ascii_lowercase();
-    if text.starts_with("<svg") || (text.starts_with("<?xml") && text.contains("<svg")) {
-        return Some("image/svg+xml");
-    }
+
     let content_type = content_type.split(';').next().unwrap_or("").trim();
     match content_type {
         "image/png" => Some("image/png"),
         "image/jpeg" | "image/jpg" => Some("image/jpeg"),
         "image/gif" => Some("image/gif"),
         "image/webp" => Some("image/webp"),
-        "image/svg+xml" => Some("image/svg+xml"),
         "image/x-icon" | "image/vnd.microsoft.icon" => Some("image/x-icon"),
         _ => None,
     }
@@ -311,9 +418,51 @@ mod tests {
     }
 
     #[test]
-    fn detects_images() {
-        assert_eq!(sniff_image(b"\x89PNG\r\n\x1a\n", ""), Some("image/png"));
-        assert_eq!(sniff_image(b"<svg xmlns=\"...\">", ""), Some("image/svg+xml"));
+    fn rejects_svg_and_non_images() {
+        assert_eq!(sniff_image(b"<svg xmlns=\"...\">", ""), None);
         assert_eq!(sniff_image(b"<html>", "text/html"), None);
+        assert_eq!(
+            sniff_image(b"<?xml version=\"1.0\"?><svg>", "image/svg+xml"),
+            None
+        );
+    }
+
+    #[test]
+    fn detects_raster_images() {
+        assert_eq!(sniff_image(b"\x89PNG\r\n\x1a\n", ""), Some("image/png"));
+        assert_eq!(sniff_image(b"GIF89a", ""), Some("image/gif"));
+    }
+
+    #[test]
+    fn blocks_private_and_special_addresses() {
+        for raw in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.20.110",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "255.255.255.255",
+            "198.18.0.1",
+            "::1",
+            "::",
+            "fc00::1",
+            "fe80::1",
+            "::ffff:127.0.0.1",
+            "::ffff:192.168.1.1",
+        ] {
+            let ip: IpAddr = raw.parse().unwrap();
+            assert!(is_forbidden_ip(ip), "{raw} should be blocked");
+        }
+    }
+
+    #[test]
+    fn allows_public_addresses() {
+        for raw in ["1.1.1.1", "8.8.8.8", "93.184.216.34", "2606:4700:4700::1111"] {
+            let ip: IpAddr = raw.parse().unwrap();
+            assert!(!is_forbidden_ip(ip), "{raw} should be allowed");
+        }
     }
 }

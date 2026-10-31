@@ -13,6 +13,10 @@ services:
     environment:
       APP_PASSWORD: "${APP_PASSWORD:-}"
       SEED_DEMO: "${SEED_DEMO:-true}"
+      ALLOW_INSECURE: "${ALLOW_INSECURE:-}"
+      ALLOW_PRIVATE_NETWORK: "${ALLOW_PRIVATE_NETWORK:-}"
+      COOKIE_SECURE: "${COOKIE_SECURE:-}"
+      TRUST_PROXY: "${TRUST_PROXY:-}"
       TZ: "${TZ:-Asia/Shanghai}"
     volumes:
       - ./data:/data

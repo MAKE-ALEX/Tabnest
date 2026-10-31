@@ -127,6 +127,12 @@ pub struct ImportStats {
 
 pub async fn import_boards(pool: &SqlitePool, boards: Vec<ImportBoard>) -> AppResult<ImportStats> {
     const MAX_LINKS: usize = 20_000;
+    const MAX_BOARDS: usize = 500;
+    const MAX_COLUMNS: usize = 2000;
+
+    if boards.len() > MAX_BOARDS {
+        return Err(AppError::bad_request("面板数量过多"));
+    }
 
     let mut stats = ImportStats::default();
     let mut tx = pool.begin().await?;
@@ -135,6 +141,10 @@ pub async fn import_boards(pool: &SqlitePool, boards: Vec<ImportBoard>) -> AppRe
         if stats.links >= MAX_LINKS {
             stats.skipped += 1;
             break;
+        }
+        if stats.columns >= MAX_COLUMNS {
+            stats.skipped += board.columns.len();
+            continue;
         }
         let board_name = fallback_name(&board.name, "导入的面板");
         let position: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(position), -1) + 1 FROM boards")

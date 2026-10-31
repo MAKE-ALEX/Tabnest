@@ -8,6 +8,7 @@ use serde_json::json;
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_JS: &str = include_str!("../static/app.js");
+const THEME_INIT_JS: &str = include_str!("../static/theme-init.js");
 const STYLE_CSS: &str = include_str!("../static/style.css");
 const FAVICON_SVG: &str = include_str!("../static/favicon.svg");
 const MANIFEST: &str = include_str!("../static/manifest.webmanifest");
@@ -17,6 +18,7 @@ pub fn router() -> Router {
         .route("/", get(index))
         .route("/index.html", get(index))
         .route("/app.js", get(app_js))
+        .route("/theme-init.js", get(theme_init_js))
         .route("/style.css", get(style_css))
         .route("/favicon.svg", get(favicon))
         .route("/manifest.webmanifest", get(manifest))
@@ -44,6 +46,10 @@ async fn index() -> Response {
 
 async fn app_js() -> Response {
     text_response(APP_JS, "text/javascript; charset=utf-8")
+}
+
+async fn theme_init_js() -> Response {
+    text_response(THEME_INIT_JS, "text/javascript; charset=utf-8")
 }
 
 async fn style_css() -> Response {

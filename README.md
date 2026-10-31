@@ -5,7 +5,7 @@ Tabnest 是一个自托管的 **Papaly 风格书签起始页**：用「面板 �
 - 后端：Rust + Axum + SQLx + SQLite（WAL）
 - 前端：原生 HTML / CSS / JavaScript，无构建步骤
 - 部署：单二进制或 Docker Compose，数据落在宿主机 `./data` 目录
-- 访问保护：可选的单密码登录（`APP_PASSWORD`）
+- 访问保护：单密码登录（默认强制；仅回环监听或显式 `ALLOW_INSECURE=true` 可免密）
 
 ## 界面
 
@@ -26,7 +26,7 @@ Tabnest 是一个自托管的 **Papaly 风格书签起始页**：用「面板 �
 | 外观 | 6 套配色（陶土 / 苔绿 / 海蓝 / 紫藤 / 樱粉 / 琥珀）× 浅色 / 深色 / 跟随系统 |
 | 导入导出 | 导入 Tabnest JSON 或 Chrome/Edge/Firefox 导出的 HTML；导出 JSON（备份）或 HTML（可再导入浏览器） |
 | 图标缓存 | favicon 由服务端代理下载并缓存在 `data/favicons/`，不依赖第三方图标服务 |
-| 可选密码 | 设置 `APP_PASSWORD` 后需要登录；会话保存在内存中，重启后重新登录 |
+| 访问保护 | 单密码登录；非回环监听且未设密码时拒绝启动；会话 7 天滑动过期 |
 | 快捷键 | `/` 或 `Ctrl/⌘ + K` 聚焦搜索，`n` 新建书签，`Esc` 关闭 / 清空搜索 |
 
 左下角「主题」可以切换 6 套配色和明暗模式，设置只保存在当前浏览器。
@@ -37,7 +37,10 @@ Tabnest 是一个自托管的 **Papaly 风格书签起始页**：用「面板 �
 
 ```bash
 cd /opt/code
-cp .env.example .env      # 按需修改 PORT / APP_PASSWORD
+cp .env.example .env
+# 打开 .env，至少填写一个访问密码：
+#   APP_PASSWORD=你的密码
+# 确实要在内网无鉴权运行时，才设置 ALLOW_INSECURE=true
 docker compose up -d --build
 ```
 
@@ -48,7 +51,7 @@ docker compose up -d --build
 - 端口：宿主机 `8420` → 容器 `8080`
 - 数据：`./data/tabnest.db`（SQLite）、`./data/favicons/`
 - 首次启动写入一块示例面板（`SEED_DEMO=false` 可关闭）
-- 未设置密码时，任何能访问端口的人都可以读写书签
+- **未设置密码且监听非回环地址时，程序会拒绝启动**；如需无鉴权运行必须显式设置 `ALLOW_INSECURE=true`
 
 停止 / 更新：
 
@@ -62,7 +65,11 @@ docker compose up -d --build
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `PORT` | `8420` | Compose 映射到宿主机的端口 |
-| `APP_PASSWORD` | 空 | 非空时启用单密码登录 |
+| `APP_PASSWORD` | 空 | 非空时启用单密码登录；为空且监听非回环地址时拒绝启动 |
+| `ALLOW_INSECURE` | `false` | 明确允许无密码运行（危险） |
+| `ALLOW_PRIVATE_NETWORK` | `false` | 允许服务端抓取内网 / 本机地址（SSRF 风险，默认关闭） |
+| `COOKIE_SECURE` | `false` | 会话 Cookie 加 `Secure`，HTTPS 反向代理后开启 |
+| `TRUST_PROXY` | `false` | 信任 `X-Forwarded-For` 做登录限速；仅在有可信代理时开启 |
 | `SEED_DEMO` | `true` | 空数据库首次启动时写入示例内容 |
 | `BIND_ADDR` | `0.0.0.0:8080` | 容器内监听地址 |
 | `DATA_DIR` | `/data` | 数据库与图标缓存目录 |
@@ -157,10 +164,17 @@ migrations/        SQLite schema
 
 ## 安全说明
 
-- 不设 `APP_PASSWORD` 时**没有鉴权**，请只在可信内网或反向代理认证之后暴露端口。
-- 会话 Cookie 为 `HttpOnly; SameSite=Lax`，未设置 `Secure`，因此可以直接走 HTTP；放到公网时建议用 Caddy / Nginx 加 HTTPS。
-- 添加书签时服务端会请求目标网址以抓取标题和图标。应用默认面向私人内网，未限制访问内网地址；如果暴露到公网，请注意 SSRF 风险。
+- **默认拒绝无密码暴露**：`APP_PASSWORD` 为空且 `BIND_ADDR` 不是回环地址时，程序启动即报错。只有显式设置 `ALLOW_INSECURE=true` 才会继续。
+- **SSRF 防护**：`/api/meta`、`/api/favicon`、新建书签的自动抓取都会解析域名并检查 IP，默认拒绝回环、私网、链路本地、CGNAT、组播等地址；重定向逐跳校验，DNS 结果固定到已校验的 IP，避免 DNS rebinding。确需收藏内网地址时设置 `ALLOW_PRIVATE_NETWORK=true`。
+- **favicon 只接受位图**：PNG / JPEG / GIF / WebP / ICO；SVG 被拒绝，响应带 `nosniff`、`Content-Security-Policy: default-src 'none'; sandbox`，避免同源 SVG XSS。
+- **登录限速**：同一 IP 10 分钟内失败 5 次后锁定 15 分钟，返回 429 + `Retry-After`；密码比较先做 SHA-256 再恒定时间比较，不泄露长度。
+- **会话**：7 天滑动过期，Cookie 为 `HttpOnly; SameSite=Lax`；通过 HTTPS 反向代理部署时设置 `COOKIE_SECURE=true`，Cookie 会加 `Secure`。
+- **CSRF**：所有写接口校验 `Origin` 与 `Sec-Fetch-Site`；跨站或同站不同端口（例如 `:3000` → `:8420`）的写请求返回 403。
+- **安全响应头**：全局 CSP（脚本仅允许同源，主题引导已拆到 `/theme-init.js`）、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`、`Permissions-Policy` 等；HTTPS 请求额外发送 HSTS。
+- **缓存上限**：favicon 磁盘缓存最多保留 1000 个文件，超出后按修改时间淘汰。
+- **部署建议**：公网或不可信网络请用 Caddy / Nginx 终止 TLS 并转发到 `8420`，同时设置 `COOKIE_SECURE=true` 和 `TRUST_PROXY=true`；`APP_PASSWORD` 修改后需重启容器，旧会话会失效（会话只在内存中）。
 - 容器以非 root 用户 `tabnest`（UID 10001）运行；入口脚本只用 root 修正 `./data` 权限，随后立即降权。
+- 依赖库（tokio / sqlx / openssl 等）内部仍会使用 `unsafe` 与 C 库交互；应用代码通过 `#![forbid(unsafe_code)]` 禁止手写 `unsafe`。
 
 ## License
 
