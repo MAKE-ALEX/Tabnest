@@ -2695,9 +2695,6 @@ body::before {
 .board-view {
   display: block;
   flex: 0 0 auto;
-  column-width: 204px;
-  column-count: auto;
-  column-gap: 8px;
   height: auto;
   min-height: 0;
   padding: 0 22px 60px 8px;
@@ -2705,27 +2702,30 @@ body::before {
   scroll-behavior: auto;
 }
 
-html[data-columns="2"] .board-view { column-count: 2; column-width: auto; }
-html[data-columns="3"] .board-view { column-count: 3; column-width: auto; }
-html[data-columns="4"] .board-view { column-count: 4; column-width: auto; }
-html[data-columns="5"] .board-view { column-count: 5; column-width: auto; }
-html[data-columns="6"] .board-view { column-count: 6; column-width: auto; }
-html[data-columns="7"] .board-view { column-count: 7; column-width: auto; }
-html[data-columns="8"] .board-view { column-count: 8; column-width: auto; }
+.masonry-grid {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+}
 
-html[data-columns] .board-view.search-mode {
-  column-count: auto;
-  column-width: auto;
+.masonry-col {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
 }
 
 .column {
   display: block;
+  flex: none;
   width: 100%;
   max-height: none;
-  margin: 0 0 8px;
+  margin: 0;
   padding: 0;
-  break-inside: avoid;
-  page-break-inside: avoid;
+  break-inside: auto;
+  page-break-inside: auto;
   border: 1px solid var(--glass-border);
   border-left: 4px solid var(--cat, var(--accent));
   border-radius: 4px;
@@ -2950,9 +2950,8 @@ html[data-columns] .board-view.search-mode {
   gap: 5px;
   width: 100%;
   height: 42px;
-  margin: 0 0 8px;
+  margin: 8px 0 0;
   padding: 0;
-  break-inside: avoid;
   border: 1px dashed rgba(255, 255, 255, 0.22);
   border-radius: 4px;
   background: rgba(255, 255, 255, 0.07);
