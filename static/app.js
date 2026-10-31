@@ -77,6 +77,7 @@
     overCard: null,
     overColumn: null,
     overColumnEl: null,
+    overVisualCol: null,
     overBoard: null,
     suppressClickUntil: 0,
     lastX: null,
@@ -687,13 +688,16 @@
     const visual = ensureBoardLayout(board);
     const byId = new Map(board.columns.map((column) => [column.id, column]));
     const grid = visual
-      .map(
-        (ids, index) => `<div class="masonry-col" data-visual-col="${index}">${ids
+      .map((ids, index) => {
+        const cards = ids
           .map((id) => byId.get(id))
           .filter(Boolean)
           .map(renderColumn)
-          .join('')}</div>`
-      )
+          .join('');
+        return `<div class="masonry-col ${cards ? '' : 'is-empty'}" data-visual-col="${index}">${
+          cards || '<div class="masonry-empty">拖到这里</div>'
+        }</div>`;
+      })
       .join('');
     els.boardView.innerHTML = `<div class="masonry-grid">${grid}</div>
       <button class="column-add" data-act="new-column" data-board-id="${board.id}">${SVG.plus}<span>新建分组</span></button>`;
@@ -1432,8 +1436,8 @@
      ---------------------------------------------------------- */
 
   function clearIndicators() {
-    $$('.drop-before, .drop-after, .drop-active, .drop-left, .drop-right').forEach((el) => {
-      el.classList.remove('drop-before', 'drop-after', 'drop-active', 'drop-left', 'drop-right');
+    $$('.drop-before, .drop-after, .drop-active, .drop-left, .drop-right, .drop-empty').forEach((el) => {
+      el.classList.remove('drop-before', 'drop-after', 'drop-active', 'drop-left', 'drop-right', 'drop-empty');
     });
   }
 
@@ -1446,6 +1450,7 @@
     drag.overCard = null;
     drag.overColumn = null;
     drag.overColumnEl = null;
+    drag.overVisualCol = null;
     drag.overBoard = null;
     drag.lastX = null;
     drag.lastY = null;
@@ -1499,13 +1504,23 @@
 
     if (drag.payload.type === 'column') {
       const column = node.closest('.column');
-      if (!column || column === drag.el || !els.boardView.contains(column)) return;
-      clearIndicators();
-      const rect = column.getBoundingClientRect();
-      column.classList.add(
-        y < rect.top + rect.height / 2 ? 'drop-before' : 'drop-after'
-      );
-      drag.overColumnEl = column;
+      if (column && column !== drag.el && els.boardView.contains(column)) {
+        clearIndicators();
+        const rect = column.getBoundingClientRect();
+        column.classList.add(
+          y < rect.top + rect.height / 2 ? 'drop-before' : 'drop-after'
+        );
+        drag.overColumnEl = column;
+        drag.overVisualCol = null;
+        return;
+      }
+      const wrapper = node.closest('.masonry-col');
+      if (wrapper && !wrapper.querySelector('.column')) {
+        clearIndicators();
+        wrapper.classList.add('drop-empty');
+        drag.overColumnEl = null;
+        drag.overVisualCol = wrapper;
+      }
       return;
     }
 
@@ -1631,6 +1646,17 @@
           event.clientY < rect.top + rect.height / 2 ? 'drop-before' : 'drop-after'
         );
         drag.overColumnEl = column;
+        drag.overVisualCol = null;
+        return;
+      }
+      const wrapper = event.target.closest('.masonry-col');
+      if (wrapper && els.boardView.contains(wrapper) && !wrapper.querySelector('.column')) {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+        clearIndicators();
+        wrapper.classList.add('drop-empty');
+        drag.overColumnEl = null;
+        drag.overVisualCol = wrapper;
       }
       return;
     }
@@ -1683,6 +1709,10 @@
         }
         await moveLink(payload.id, payload.columnId, targetColumnId, index);
       } else if (payload.type === 'column') {
+        if (drag.overVisualCol) {
+          await moveColumnToVisual(payload.id, Number(drag.overVisualCol.dataset.visualCol));
+          return;
+        }
         const point = document.elementFromPoint(event.clientX, event.clientY) || event.target;
         const targetColumn =
           point.closest('.column') || event.target.closest('.column') || drag.overColumnEl;
@@ -1742,6 +1772,28 @@
     if (index === -1) index = list.length;
     else if (!before) index += 1;
     list.splice(Math.max(0, Math.min(index, list.length)), 0, columnId);
+
+    localStorage.setItem(layoutStorageKey(board.id), JSON.stringify(visual));
+    const flat = visual.flat();
+    const order = new Map(flat.map((id, position) => [id, position]));
+    board.columns.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+
+    renderMain();
+    await api('/api/columns/order', {
+      method: 'PUT',
+      body: { board_id: board.id, ids: flat },
+    });
+  }
+
+  async function moveColumnToVisual(columnId, visualIndex) {
+    const board = activeBoard();
+    if (!board) return;
+    const visual = ensureBoardLayout(board);
+    const source = visual.findIndex((list) => list.includes(columnId));
+    if (source === -1) return;
+    visual[source] = visual[source].filter((id) => id !== columnId);
+    const target = Math.max(0, Math.min(Number(visualIndex), visual.length - 1));
+    visual[target].unshift(columnId);
 
     localStorage.setItem(layoutStorageKey(board.id), JSON.stringify(visual));
     const flat = visual.flat();

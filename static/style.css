@@ -2717,6 +2717,31 @@ body::before {
   min-width: 0;
 }
 
+.masonry-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 140px;
+  padding: 12px;
+  border: 1px dashed rgba(255, 255, 255, 0.22);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--page-muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+[data-theme="light"] .masonry-empty {
+  border-color: rgba(29, 34, 41, 0.18);
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.masonry-col.drop-empty .masonry-empty {
+  border-color: var(--accent);
+  background: var(--accent-ghost);
+  color: var(--accent);
+}
+
 .column {
   display: block;
   flex: none;
