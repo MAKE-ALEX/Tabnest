@@ -369,6 +369,7 @@
     if (persist) localStorage.setItem('tabnest.columns', valid);
     updateAppearanceButton();
     syncAppearancePanel();
+    if (state.boards.length && !state.query.trim()) renderMain();
   }
 
   function openAppearance(anchor) {
@@ -572,6 +573,79 @@
     }
   }
 
+  const MASONRY_TARGET = 204;
+  const MASONRY_GAP = 8;
+
+  function layoutStorageKey(boardId) {
+    return `tabnest.layout.${boardId}`;
+  }
+
+  function visualColumnCount() {
+    if (window.matchMedia('(max-width: 900px)').matches) return 1;
+    if (state.columns !== 'auto') {
+      const count = Number(state.columns);
+      if (Number.isFinite(count) && count > 0) return count;
+    }
+    const width = els.boardView?.clientWidth || window.innerWidth;
+    return Math.max(1, Math.floor((width + MASONRY_GAP) / (MASONRY_TARGET + MASONRY_GAP)));
+  }
+
+  function estimateColumnHeight(column) {
+    return 44 + (column?.links?.length || 0) * 25;
+  }
+
+  function ensureBoardLayout(board) {
+    const count = visualColumnCount();
+    const byId = new Map(board.columns.map((column) => [column.id, column]));
+    let saved = null;
+    try {
+      const parsed = JSON.parse(localStorage.getItem(layoutStorageKey(board.id)) || 'null');
+      if (Array.isArray(parsed)) saved = parsed;
+    } catch {
+      saved = null;
+    }
+
+    let visual;
+    if (saved && saved.length === count) {
+      const seen = new Set();
+      visual = saved.map((list) => {
+        if (!Array.isArray(list)) return [];
+        return list
+          .map(Number)
+          .filter((id) => {
+            if (!byId.has(id) || seen.has(id)) return false;
+            seen.add(id);
+            return true;
+          });
+      });
+    } else {
+      visual = Array.from({ length: count }, () => []);
+    }
+
+    for (const column of board.columns) {
+      if (visual.some((list) => list.includes(column.id))) continue;
+      let target = 0;
+      let shortest = Infinity;
+      for (let index = 0; index < count; index += 1) {
+        const height = visual[index].reduce(
+          (sum, id) => sum + estimateColumnHeight(byId.get(id)),
+          0
+        );
+        if (height < shortest) {
+          shortest = height;
+          target = index;
+        }
+      }
+      visual[target].push(column.id);
+    }
+
+    const serialized = JSON.stringify(visual);
+    if (localStorage.getItem(layoutStorageKey(board.id)) !== serialized) {
+      localStorage.setItem(layoutStorageKey(board.id), serialized);
+    }
+    return visual;
+  }
+
   function renderMain() {
     if (state.query.trim()) {
       renderSearch();
@@ -610,9 +684,19 @@
       return;
     }
 
-    els.boardView.innerHTML =
-      board.columns.map(renderColumn).join('') +
-      `<button class="column-add" data-act="new-column" data-board-id="${board.id}">${SVG.plus}<span>新建分组</span></button>`;
+    const visual = ensureBoardLayout(board);
+    const byId = new Map(board.columns.map((column) => [column.id, column]));
+    const grid = visual
+      .map(
+        (ids, index) => `<div class="masonry-col" data-visual-col="${index}">${ids
+          .map((id) => byId.get(id))
+          .filter(Boolean)
+          .map(renderColumn)
+          .join('')}</div>`
+      )
+      .join('');
+    els.boardView.innerHTML = `<div class="masonry-grid">${grid}</div>
+      <button class="column-add" data-act="new-column" data-board-id="${board.id}">${SVG.plus}<span>新建分组</span></button>`;
   }
 
   function renderColumn(column) {
@@ -1646,22 +1730,28 @@
 
   async function moveColumn(columnId, targetId, before) {
     const board = activeBoard();
-    if (!board) return;
-    const fromIndex = board.columns.findIndex((column) => column.id === columnId);
-    if (fromIndex === -1) return;
-    const [column] = board.columns.splice(fromIndex, 1);
-    let targetIndex = board.columns.findIndex((item) => item.id === targetId);
-    if (targetIndex === -1) {
-      board.columns.splice(fromIndex, 0, column);
-      return;
-    }
-    if (!before) targetIndex += 1;
-    board.columns.splice(targetIndex, 0, column);
+    if (!board || columnId === targetId) return;
+    const visual = ensureBoardLayout(board);
+    const source = visual.findIndex((list) => list.includes(columnId));
+    const target = visual.findIndex((list) => list.includes(targetId));
+    if (source === -1 || target === -1) return;
 
-    render();
+    visual[source] = visual[source].filter((id) => id !== columnId);
+    const list = visual[target];
+    let index = list.indexOf(targetId);
+    if (index === -1) index = list.length;
+    else if (!before) index += 1;
+    list.splice(Math.max(0, Math.min(index, list.length)), 0, columnId);
+
+    localStorage.setItem(layoutStorageKey(board.id), JSON.stringify(visual));
+    const flat = visual.flat();
+    const order = new Map(flat.map((id, position) => [id, position]));
+    board.columns.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+
+    renderMain();
     await api('/api/columns/order', {
       method: 'PUT',
-      body: { board_id: board.id, ids: board.columns.map((item) => item.id) },
+      body: { board_id: board.id, ids: flat },
     });
   }
 
@@ -1750,6 +1840,14 @@
         { passive: true }
       );
     }
+
+    let layoutResizeTimer = null;
+    window.addEventListener('resize', () => {
+      window.clearTimeout(layoutResizeTimer);
+      layoutResizeTimer = window.setTimeout(() => {
+        if (state.boards.length && !state.query.trim()) renderMain();
+      }, 160);
+    });
 
     let searchTimer = null;
     els.search.addEventListener('input', () => {
