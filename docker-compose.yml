@@ -1,0 +1,24 @@
+services:
+  tabnest:
+    build:
+      context: .
+      args:
+        CARGO_REGISTRY_MIRROR: "${CARGO_REGISTRY_MIRROR:-}"
+        DEBIAN_MIRROR: "${DEBIAN_MIRROR:-}"
+    image: tabnest:latest
+    container_name: tabnest
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8420}:8080"
+    environment:
+      APP_PASSWORD: "${APP_PASSWORD:-}"
+      SEED_DEMO: "${SEED_DEMO:-true}"
+      TZ: "${TZ:-Asia/Shanghai}"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 4s
+      retries: 3
+      start_period: 10s
