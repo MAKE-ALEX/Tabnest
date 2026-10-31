@@ -111,6 +111,14 @@
     return `tint-${hash % 6}`;
   }
 
+  function categoryColor(text) {
+    let hash = 0;
+    for (const ch of String(text || '')) {
+      hash = (hash * 31 + ch.codePointAt(0)) >>> 0;
+    }
+    return `cat-${hash % 9}`;
+  }
+
   function hostOf(url) {
     try {
       return new URL(url).host.replace(/^www\./, '');
@@ -359,9 +367,7 @@
     const rect = anchor.getBoundingClientRect();
     const width = element.offsetWidth;
     const height = element.offsetHeight;
-    const sidebarLeft = els.sidebar.getBoundingClientRect().left;
-    let left = Math.max(12, sidebarLeft + 12);
-    left = Math.min(left, window.innerWidth - width - 12);
+    let left = Math.max(12, Math.min(rect.left, window.innerWidth - width - 12));
     let top = rect.top - height - 8;
     if (top < 12) top = Math.min(rect.bottom + 8, window.innerHeight - height - 12);
     element.style.left = `${left}px`;
@@ -484,7 +490,7 @@
     els.boardList.innerHTML = state.boards
       .map((board) => {
         const count = board.columns.reduce((total, column) => total + column.links.length, 0);
-        return `<div class="board-item ${board.id === state.activeId ? 'active' : ''}" data-board-id="${board.id}" role="button" tabindex="0" draggable="true" aria-label="${attr(board.name)}">
+        return `<div class="board-item ${board.id === state.activeId ? 'active' : ''}" data-board-id="${board.id}" role="button" tabindex="0" draggable="true" title="${attr(board.name)}" aria-label="${attr(board.name)}">
           <span class="board-avatar ${tint(board.name)}">${esc(initial(board.name))}</span>
           <span class="board-name">${esc(board.name)}</span>
           <span class="board-count">${count}</span>
@@ -542,8 +548,8 @@
   }
 
   function renderColumn(column) {
-    return `<section class="column" data-column-id="${column.id}">
-      <header class="column-head" draggable="true" data-column-id="${column.id}" title="拖动排序">
+    return `<section class="column ${categoryColor(column.name)}" data-column-id="${column.id}">
+      <header class="column-head" data-column-id="${column.id}" title="${attr(column.name)}">
         <h2 class="column-title">${esc(column.name)}</h2>
         <span class="column-count">${column.links.length}</span>
         <div class="column-tools">
@@ -565,7 +571,7 @@
     const icon = link.icon
       ? `<img src="/api/favicon?u=${encodeURIComponent(link.icon)}" alt="" loading="lazy">`
       : '';
-    return `<article class="link-card" ${draggable ? 'draggable="true"' : ''} data-link-id="${link.id}" data-column-id="${link.column_id}">
+    return `<article class="link-card" ${draggable ? 'draggable="true"' : ''} data-link-id="${link.id}" data-column-id="${link.column_id}" title="${attr(link.note || link.url)}">
       <a class="link-main" href="${attr(link.url)}" target="_blank" rel="noopener noreferrer" draggable="false">
         <span class="favicon ${tint(link.title)} ${link.icon ? '' : 'no-icon'}" data-letter="${attr(letter)}">
           <span class="fallback">${esc(letter)}</span>${icon}
@@ -694,113 +700,40 @@
      Inline create forms
      ---------------------------------------------------------- */
 
-  function startNewBoard() {
-    const existing = els.boardList.querySelector('.new-board-form');
-    if (existing) {
-      existing.querySelector('input')?.focus();
-      return;
+  async function startNewBoard() {
+    const name = await promptDialog({
+      title: '新建面板',
+      label: '面板名称',
+      confirmText: '创建',
+    });
+    if (!name) return;
+    try {
+      const result = await api('/api/boards', { method: 'POST', body: { name } });
+      state.activeId = result.id;
+      persistActive();
+      await refresh();
+      toast('面板已创建');
+    } catch (error) {
+      toast(error.message, 'error');
     }
-    const form = document.createElement('form');
-    form.className = 'new-board-form';
-    form.innerHTML = `<input maxlength="60" placeholder="面板名称" aria-label="面板名称"><button class="btn primary" type="submit">创建</button>`;
-    els.boardList.prepend(form);
-    const input = form.querySelector('input');
-    input.focus();
-
-    let finished = false;
-    const cancel = () => {
-      if (!finished) {
-        finished = true;
-        form.remove();
-      }
-    };
-    input.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') {
-        finished = true;
-        form.remove();
-      }
-    });
-    input.addEventListener('blur', () => {
-      window.setTimeout(() => {
-        if (!finished && !form.contains(document.activeElement)) cancel();
-      }, 140);
-    });
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const name = input.value.trim();
-      if (!name) {
-        input.focus();
-        return;
-      }
-      if (finished) return;
-      finished = true;
-      try {
-        const result = await api('/api/boards', { method: 'POST', body: { name } });
-        state.activeId = result.id;
-        persistActive();
-        await refresh();
-        toast('面板已创建');
-      } catch (error) {
-        finished = false;
-        toast(error.message, 'error');
-        input.focus();
-      }
-    });
   }
 
-  function startNewColumn(boardId) {
+  async function startNewColumn(boardId) {
     const board = state.boards.find((item) => item.id === boardId);
     if (!board) return;
-    const target = els.boardView.querySelector('.empty-board, .column-add');
-    if (!target) return;
-
-    const wrapper = document.createElement('div');
-    wrapper.className = 'column column-new';
-    wrapper.innerHTML = `<form class="new-column-form">
-      <input maxlength="60" placeholder="分组名称" aria-label="分组名称">
-      <div class="new-column-actions">
-        <button class="btn ghost" type="button" data-cancel>取消</button>
-        <button class="btn primary" type="submit">创建</button>
-      </div>
-    </form>`;
-    target.replaceWith(wrapper);
-    const input = wrapper.querySelector('input');
-    input.focus();
-
-    let finished = false;
-    const restore = () => {
-      if (finished) return;
-      finished = true;
-      renderMain();
-    };
-    wrapper.querySelector('[data-cancel]').addEventListener('click', restore);
-    input.addEventListener('keydown', (event) => {
-      if (event.key === 'Escape') restore();
+    const name = await promptDialog({
+      title: '新建分组',
+      label: '分组名称',
+      confirmText: '创建',
     });
-    input.addEventListener('blur', () => {
-      window.setTimeout(() => {
-        if (!finished && !wrapper.contains(document.activeElement)) restore();
-      }, 140);
-    });
-    wrapper.querySelector('form').addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const name = input.value.trim();
-      if (!name) {
-        input.focus();
-        return;
-      }
-      if (finished) return;
-      finished = true;
-      try {
-        await api('/api/columns', { method: 'POST', body: { board_id: board.id, name } });
-        await refresh();
-        toast('分组已创建');
-      } catch (error) {
-        finished = false;
-        toast(error.message, 'error');
-        input.focus();
-      }
-    });
+    if (!name) return;
+    try {
+      await api('/api/columns', { method: 'POST', body: { board_id: board.id, name } });
+      await refresh();
+      toast('分组已创建');
+    } catch (error) {
+      toast(error.message, 'error');
+    }
   }
 
   /* ----------------------------------------------------------
@@ -1634,6 +1567,16 @@
     scheme.addEventListener('change', () => {
       if (state.mode === 'auto') applyAppearance('auto', state.palette, false);
     });
+
+    const mainScroller = document.querySelector('.main');
+    const topbar = document.querySelector('.topbar');
+    if (mainScroller && topbar) {
+      mainScroller.addEventListener(
+        'scroll',
+        () => topbar.classList.toggle('is-scrolled', mainScroller.scrollTop > 6),
+        { passive: true }
+      );
+    }
 
     let searchTimer = null;
     els.search.addEventListener('input', () => {
