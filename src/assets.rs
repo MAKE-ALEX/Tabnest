@@ -87,8 +87,7 @@ pub async fn not_found(uri: Uri) -> Response {
             .into_response();
     }
     let body = "<!doctype html><html lang=\"zh-CN\"><meta charset=\"utf-8\"><title>404</title>\
-                <body style=\"font-family:system-ui;padding:48px;color:#333\">\
-                <h1>404</h1><p>页面不存在。</p><p><a href=\"/\">返回 Tabnest</a></p></body></html>";
+                <body><h1>404</h1><p>页面不存在。</p><p><a href=\"/\">返回 Tabnest</a></p></body></html>";
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,

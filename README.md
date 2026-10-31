@@ -68,8 +68,9 @@ docker compose up -d --build
 | `APP_PASSWORD` | 空 | 非空时启用单密码登录；为空且监听非回环地址时拒绝启动 |
 | `ALLOW_INSECURE` | `false` | 明确允许无密码运行（危险） |
 | `ALLOW_PRIVATE_NETWORK` | `false` | 允许服务端抓取内网 / 本机地址（SSRF 风险，默认关闭） |
-| `COOKIE_SECURE` | `false` | 会话 Cookie 加 `Secure`，HTTPS 反向代理后开启 |
-| `TRUST_PROXY` | `false` | 信任 `X-Forwarded-For` 做登录限速；仅在有可信代理时开启 |
+| `COOKIE_SECURE` | `false` | 会话 Cookie 加 `Secure` 并使用 `__Host-` 前缀；HTTPS 反向代理后开启 |
+| `TRUST_PROXY` | `false` | 旧兼容开关：信任任意对端的转发头；建议改用 `TRUSTED_PROXIES` |
+| `TRUSTED_PROXIES` | 空 | 可信代理 CIDR 列表（逗号分隔），如 `172.16.0.0/12`；仅这些网段可提供 `CF-Connecting-IP` / XFF |
 | `SEED_DEMO` | `true` | 空数据库首次启动时写入示例内容 |
 | `BIND_ADDR` | `0.0.0.0:8080` | 容器内监听地址 |
 | `DATA_DIR` | `/data` | 数据库与图标缓存目录 |
@@ -167,12 +168,12 @@ migrations/        SQLite schema
 - **默认拒绝无密码暴露**：`APP_PASSWORD` 为空且 `BIND_ADDR` 不是回环地址时，程序启动即报错。只有显式设置 `ALLOW_INSECURE=true` 才会继续。
 - **SSRF 防护**：`/api/meta`、`/api/favicon`、新建书签的自动抓取都会解析域名并检查 IP，默认拒绝回环、私网、链路本地、CGNAT、组播等地址；重定向逐跳校验，DNS 结果固定到已校验的 IP，避免 DNS rebinding。确需收藏内网地址时设置 `ALLOW_PRIVATE_NETWORK=true`。
 - **favicon 只接受位图**：PNG / JPEG / GIF / WebP / ICO；SVG 被拒绝，响应带 `nosniff`、`Content-Security-Policy: default-src 'none'; sandbox`，避免同源 SVG XSS。
-- **登录限速**：同一 IP 10 分钟内失败 5 次后锁定 15 分钟，返回 429 + `Retry-After`；密码比较先做 SHA-256 再恒定时间比较，不泄露长度。
-- **会话**：7 天滑动过期，Cookie 为 `HttpOnly; SameSite=Lax`；通过 HTTPS 反向代理部署时设置 `COOKIE_SECURE=true`，Cookie 会加 `Secure`。
+- **登录限速**：同一 IP 10 分钟内失败 5 次后锁定 30 秒，继续失败按 60 秒 / 2 分钟 / … / 15 分钟递增；返回 429 + `Retry-After`。位于 Cloudflare / 反向代理后时，通过可信代理网段读取 `CF-Connecting-IP`（XFF 只取最右侧非代理跳），避免所有访客共用一个边缘 IP 的额度。密码比较先做 SHA-256 再恒定时间比较，不泄露长度。
+- **会话**：7 天滑动过期，Cookie 为 `HttpOnly; SameSite=Lax`；启用 `COOKIE_SECURE=true` 后使用 `__Host-tabnest_session`（强制 Secure、Path=/、无 Domain）。
 - **CSRF**：所有写接口校验 `Origin` 与 `Sec-Fetch-Site`；跨站或同站不同端口（例如 `:3000` → `:8420`）的写请求返回 403。
-- **安全响应头**：全局 CSP（脚本仅允许同源，主题引导已拆到 `/theme-init.js`）、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`、`Permissions-Policy` 等；HTTPS 请求额外发送 HSTS。
-- **缓存上限**：favicon 磁盘缓存最多保留 1000 个文件，超出后按修改时间淘汰。
-- **部署建议**：公网或不可信网络请用 Caddy / Nginx 终止 TLS 并转发到 `8420`，同时设置 `COOKIE_SECURE=true` 和 `TRUST_PROXY=true`；`APP_PASSWORD` 修改后需重启容器，旧会话会失效（会话只在内存中）。
+- **安全响应头**：全局 CSP（脚本与样式均仅允许同源，主题引导已拆到 `/theme-init.js`）、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`、`Permissions-Policy` 等；HTTPS 请求额外发送 HSTS。
+- **缓存语义**：`/api/*` JSON 响应统一 `Cache-Control: no-store`（favicon 除外）；favicon 使用 `private` + `Vary: Cookie`。favicon 磁盘缓存最多保留 1000 个文件，超出后按修改时间淘汰。
+- **部署建议**：公网或不可信网络请用 Caddy / Nginx 或 Cloudflare Tunnel 终止 TLS 并转发到 `8420`，设置 `COOKIE_SECURE=true`，并用 `TRUSTED_PROXIES` 限定可信代理网段（例如 Cloudflare Tunnel 所在 Docker 网络），不要直接打开旧的 `TRUST_PROXY`；`APP_PASSWORD` 修改后需重启容器，旧会话会失效（会话只在内存中）。源站端口应只允许 Cloudflare / 反向代理访问，避免绕过 WAF 直接打 IP。
 - 容器以非 root 用户 `tabnest`（UID 10001）运行；入口脚本只用 root 修正 `./data` 权限，随后立即降权。
 - 依赖库（tokio / sqlx / openssl 等）内部仍会使用 `unsafe` 与 C 库交互；应用代码通过 `#![forbid(unsafe_code)]` 禁止手写 `unsafe`。
 

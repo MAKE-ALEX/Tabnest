@@ -33,12 +33,12 @@
   };
 
   const PALETTES = [
-    { id: 'clay', name: '陶土', swatch: '#c0562f' },
-    { id: 'moss', name: '苔绿', swatch: '#4f7346' },
-    { id: 'ocean', name: '海蓝', swatch: '#2f6f8f' },
-    { id: 'plum', name: '紫藤', swatch: '#7a4f86' },
-    { id: 'sakura', name: '樱粉', swatch: '#b34f68' },
-    { id: 'amber', name: '琥珀', swatch: '#8a6a2f' },
+    { id: 'clay', name: '陶土' },
+    { id: 'moss', name: '苔绿' },
+    { id: 'ocean', name: '海蓝' },
+    { id: 'plum', name: '紫藤' },
+    { id: 'sakura', name: '樱粉' },
+    { id: 'amber', name: '琥珀' },
   ];
 
   const MODES = [
@@ -344,7 +344,7 @@
         <div class="palette-grid">
           ${PALETTES.map(
             (palette) => `<button type="button" class="palette" data-palette="${palette.id}" aria-pressed="false" title="${attr(palette.name)}">
-              <span class="swatch" style="--sw:${palette.swatch}"></span>
+              <span class="swatch"></span>
               <span>${esc(palette.name)}</span>
               <span class="palette-check">${SVG.check}</span>
             </button>`

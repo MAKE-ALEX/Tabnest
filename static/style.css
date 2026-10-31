@@ -1627,9 +1627,16 @@ svg {
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: var(--sw);
+  background: #c0562f;
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.1), 0 2px 5px rgba(0, 0, 0, 0.14);
 }
+
+.palette[data-palette="clay"] .swatch { background: #c0562f; }
+.palette[data-palette="moss"] .swatch { background: #4f7346; }
+.palette[data-palette="ocean"] .swatch { background: #2f6f8f; }
+.palette[data-palette="plum"] .swatch { background: #7a4f86; }
+.palette[data-palette="sakura"] .swatch { background: #b34f68; }
+.palette[data-palette="amber"] .swatch { background: #8a6a2f; }
 
 [data-theme="dark"] .swatch {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18), 0 2px 6px rgba(0, 0, 0, 0.4);
@@ -2076,6 +2083,11 @@ svg {
 
 .only-mobile {
   display: none;
+}
+
+.noscript {
+  padding: 40px;
+  font-family: var(--font);
 }
 
 /* ------------------------------------------------------------

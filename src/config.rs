@@ -16,6 +16,9 @@ pub struct Config {
     pub cookie_secure: bool,
     /// Trust `X-Forwarded-For` / proxy headers for client IP and HSTS.
     pub trust_proxy: bool,
+    /// Proxy networks whose `CF-Connecting-IP` / `X-Forwarded-For` headers may
+    /// be trusted for rate limiting.
+    pub trusted_proxies: Vec<ipnet::IpNet>,
     /// Explicitly allow running without a password on a non-loopback bind.
     pub allow_insecure: bool,
     pub version: &'static str,
@@ -58,6 +61,20 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|_| data_dir.join("tabnest.db"));
 
+        let mut trusted_proxies = Vec::new();
+        if let Ok(value) = env::var("TRUSTED_PROXIES") {
+            for part in value.split(',') {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                trusted_proxies.push(
+                    part.parse()
+                        .with_context(|| format!("TRUSTED_PROXIES 中的 CIDR 无效：{part}"))?,
+                );
+            }
+        }
+
         Ok(Self {
             bind,
             data_dir,
@@ -67,6 +84,7 @@ impl Config {
             allow_private_network: env_flag("ALLOW_PRIVATE_NETWORK"),
             cookie_secure: env_flag("COOKIE_SECURE"),
             trust_proxy: env_flag("TRUST_PROXY"),
+            trusted_proxies,
             allow_insecure: env_flag("ALLOW_INSECURE"),
             version: env!("CARGO_PKG_VERSION"),
         })
