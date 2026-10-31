@@ -8,8 +8,8 @@
   <title>Tabnest · 个人书签面板</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="manifest" href="/manifest.webmanifest">
-  <script src="/theme-init.js"></script>
-  <link rel="stylesheet" href="/style.css">
+  <script src="/theme-init.js?v=20261031b"></script>
+  <link rel="stylesheet" href="/style.css?v=20261031b">
 </head>
 <body>
   <div class="app" id="app">
@@ -82,6 +82,7 @@
       </span>
       <h1>Tabnest</h1>
       <p>输入访问密码，打开你的书签面板。</p>
+      <p class="form-hint" id="login-hint" hidden></p>
       <label class="field">
         <span>密码</span>
         <input id="login-password" type="password" autocomplete="current-password" required autofocus>
@@ -106,6 +107,6 @@
     <p class="noscript">Tabnest 需要启用 JavaScript 才能使用。</p>
   </noscript>
 
-  <script src="/app.js" defer></script>
+  <script src="/app.js?v=20261031b" defer></script>
 </body>
 </html>

@@ -3125,6 +3125,27 @@ body::before {
   backdrop-filter: blur(3px);
 }
 
+.form-hint {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid rgba(240, 190, 90, 0.35);
+  border-radius: 6px;
+  background: rgba(240, 190, 90, 0.1);
+  color: #f0c36a;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.form-hint[hidden] {
+  display: none;
+}
+
+[data-theme="light"] .form-hint {
+  border-color: rgba(154, 102, 20, 0.28);
+  background: rgba(240, 190, 90, 0.16);
+  color: #80540f;
+}
+
 .login-card {
   border-radius: 14px;
 }

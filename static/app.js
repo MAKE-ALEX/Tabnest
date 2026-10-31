@@ -228,11 +228,23 @@
     }
   }
 
+  function updateLoginSchemeHint() {
+    const hint = $('#login-hint');
+    if (!hint) return;
+    const insecure = window.location.protocol !== 'https:';
+    hint.hidden = !insecure;
+    if (insecure) {
+      hint.textContent =
+        '当前通过 HTTP 访问，浏览器会拒绝保存安全登录 Cookie。请改用 HTTPS 域名访问后再登录。';
+    }
+  }
+
   function showLogin() {
     closeMenu();
     closeAppearance();
     if (!els.modalLayer.hidden) closeModal();
     els.loginLayer.hidden = false;
+    updateLoginSchemeHint();
     $('#boot')?.remove();
     document.title = '登录 · Tabnest';
     window.setTimeout(() => els.loginPassword?.focus(), 60);
@@ -241,6 +253,7 @@
   async function onLogin(event) {
     event.preventDefault();
     els.loginError.textContent = '';
+    updateLoginSchemeHint();
     const password = els.loginPassword.value;
     if (!password) return;
 
@@ -253,7 +266,13 @@
       await loadState();
       $('#boot')?.remove();
     } catch (error) {
-      els.loginError.textContent = error.message;
+      const insecure = window.location.protocol !== 'https:';
+      els.loginError.textContent =
+        error.message === '请先登录'
+          ? insecure
+            ? '登录成功，但 HTTP 下无法保存安全 Cookie；请改用 HTTPS 域名。'
+            : '登录成功但会话未保存，请确认浏览器允许保存 Cookie，或换一个无痕窗口重试。'
+          : error.message;
       els.loginPassword.select();
     } finally {
       els.loginSubmit.disabled = false;
