@@ -223,11 +223,12 @@ Cloudflare Worker → 设置 → 构建 → 连接 Git：
 
 推送后也可以在 GitHub Actions 里部署：仓库已带 `.github/workflows/deploy-worker.yml`，配置 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID` 两个 secret 即可（未配置时会自动跳过）。两种方式选一个，不要同时开。
 
-本地调试：
+本地调试（`npm run dev` 会先编译 wasm）：
 
 ```bash
 cd worker
 cp .dev.vars.example .dev.vars
+npm install
 npm run dev            # http://localhost:8787，D1 由 Miniflare 本地模拟
 ```
 

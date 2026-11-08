@@ -7,8 +7,9 @@ compatibility_flags = []
 workers_dev = true
 preview_urls = false
 
-[build]
-command = "worker-build --release"
+# The wasm bundle is produced by `bash ci-build.sh` (Cloudflare Workers Builds)
+# or `npm run build` (local). Keeping it out of `wrangler deploy` means the
+# deploy step does not need the Rust toolchain on PATH.
 
 # 1) `npx wrangler d1 create tabnest`
 # 2) paste the returned database_id below (or run `npm run db:create`)

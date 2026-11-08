@@ -30,4 +30,6 @@ if ! command -v worker-build >/dev/null 2>&1; then
   cargo install worker-build --locked --version "$WORKER_BUILD_VERSION"
 fi
 
-worker-build --version
+# Build the wasm bundle during the build step: the deploy command runs in a
+# fresh shell without ~/.cargo/bin on PATH.
+worker-build --release

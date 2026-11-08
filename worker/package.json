@@ -3,7 +3,10 @@
   "private": true,
   "description": "Deploy Tabnest to Cloudflare Workers (D1 + Static Assets)",
   "scripts": {
+    "build": "worker-build --release",
+    "predev": "npm run build",
     "dev": "wrangler dev",
+    "predeploy": "npm run build",
     "deploy": "wrangler deploy",
     "db:create": "wrangler d1 create tabnest",
     "db:migrate": "wrangler d1 execute tabnest --remote --file=./schema.sql",
