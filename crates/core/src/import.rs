@@ -2,8 +2,9 @@
 
 use std::sync::OnceLock;
 
+use base64::Engine as _;
 use regex::Regex;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::html::{attr_value, decode_entities, truncate_chars};
 
@@ -15,7 +16,7 @@ pub struct ImportPayload {
     pub appearance: Option<ImportAppearance>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ImportAppearance {
     pub theme: Option<String>,
@@ -54,9 +55,77 @@ pub struct ImportLink {
 /// layout after ids have been assigned.
 #[derive(Debug, Default)]
 pub struct ImportedBoard {
+    pub name: String,
     pub id: i64,
     pub columns: Vec<(String, i64)>,
     pub layout: Option<Vec<Vec<String>>>,
+}
+
+/// Layout + appearance embedded in the Netscape HTML export as a base64
+/// comment, so HTML backups keep the visual arrangement too (browsers ignore
+/// the comment, Tabnest reads it back).
+pub const HTML_META_PREFIX: &str = "tabnest-meta:";
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LayoutMeta {
+    pub appearance: Option<ImportAppearance>,
+    pub boards: Vec<BoardLayoutMeta>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BoardLayoutMeta {
+    pub name: String,
+    pub layout: Vec<Vec<String>>,
+}
+
+impl LayoutMeta {
+    pub fn to_comment(&self) -> String {
+        let json = serde_json::to_vec(self).unwrap_or_default();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(json);
+        format!("<!-- {HTML_META_PREFIX}{encoded} -->")
+    }
+}
+
+/// Read the metadata comment written by [`LayoutMeta::to_comment`].
+pub fn parse_html_meta(html: &str) -> Option<LayoutMeta> {
+    let start = html.find(HTML_META_PREFIX)? + HTML_META_PREFIX.len();
+    let rest = &html[start..];
+    let end = rest.find("-->")?;
+    let encoded = rest[..end].trim();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Pair metadata boards with the boards this import created, matching by name
+/// in order (so duplicate board names keep their own layout).
+pub fn match_layouts(
+    meta: &LayoutMeta,
+    imported: &[ImportedBoard],
+) -> Vec<(i64, Vec<Vec<i64>>)> {
+    let mut remaining: Vec<bool> = vec![true; meta.boards.len()];
+    let mut result = Vec::new();
+
+    for board in imported {
+        let Some(index) = meta
+            .boards
+            .iter()
+            .enumerate()
+            .position(|(index, candidate)| remaining[index] && candidate.name == board.name)
+        else {
+            continue;
+        };
+        remaining[index] = false;
+        let resolved = resolve_layout(&meta.boards[index].layout, &board.columns);
+        if resolved.iter().any(|group| !group.is_empty()) {
+            result.push((board.id, resolved));
+        }
+    }
+
+    result
 }
 
 pub fn parse_json(text: &str) -> anyhow::Result<ImportPayload> {
@@ -283,5 +352,64 @@ mod tests {
             resolve_layout(&layout, &columns),
             vec![vec![10, 11], vec![12]]
         );
+    }
+
+    #[test]
+    fn html_meta_round_trips() {
+        let meta = LayoutMeta {
+            appearance: Some(ImportAppearance {
+                theme: Some("dark".to_string()),
+                palette: Some("ocean".to_string()),
+                columns: Some("8".to_string()),
+                active_board: None,
+            }),
+            boards: vec![BoardLayoutMeta {
+                name: "Bookmarks".to_string(),
+                layout: vec![
+                    vec!["网盘".to_string(), "邮箱".to_string()],
+                    vec!["翻译".to_string()],
+                ],
+            }],
+        };
+        let html = format!(
+            "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n{}\n<DL><p></DL><p>",
+            meta.to_comment()
+        );
+        let parsed = parse_html_meta(&html).expect("meta");
+        assert_eq!(parsed.appearance.unwrap().theme.as_deref(), Some("dark"));
+        assert_eq!(parsed.boards[0].name, "Bookmarks");
+        assert_eq!(parsed.boards[0].layout[0], vec!["网盘", "邮箱"]);
+    }
+
+    #[test]
+    fn matches_layouts_by_board_name() {
+        let meta = LayoutMeta {
+            appearance: None,
+            boards: vec![
+                BoardLayoutMeta {
+                    name: "同名".to_string(),
+                    layout: vec![vec!["A".to_string()]],
+                },
+                BoardLayoutMeta {
+                    name: "同名".to_string(),
+                    layout: vec![vec!["B".to_string()]],
+                },
+            ],
+        };
+        let imported = vec![
+            ImportedBoard {
+                name: "同名".to_string(),
+                id: 1,
+                columns: vec![("A".to_string(), 11)],
+                layout: None,
+            },
+            ImportedBoard {
+                name: "同名".to_string(),
+                id: 2,
+                columns: vec![("B".to_string(), 22)],
+                layout: None,
+            },
+        ];
+        assert_eq!(match_layouts(&meta, &imported), vec![(1, vec![vec![11]]), (2, vec![vec![22]])]);
     }
 }

@@ -714,6 +714,30 @@
             return true;
           });
       });
+    } else if (saved) {
+      // Fewer/more visual columns than when the layout was saved (narrow
+      // window, zoom, changed setting): reflow the saved columns instead of
+      // discarding the arrangement, and keep the canonical copy untouched.
+      const flat = saved
+        .flat()
+        .map(Number)
+        .filter((id) => byId.has(id));
+      visual = Array.from({ length: count }, () => []);
+      for (const id of flat) {
+        let target = 0;
+        let shortest = Infinity;
+        for (let index = 0; index < count; index += 1) {
+          const height = visual[index].reduce(
+            (sum, columnId) => sum + estimateColumnHeight(byId.get(columnId)),
+            0
+          );
+          if (height < shortest) {
+            shortest = height;
+            target = index;
+          }
+        }
+        visual[target].push(id);
+      }
     } else {
       visual = Array.from({ length: count }, () => []);
     }
@@ -735,9 +759,13 @@
       visual[target].push(column.id);
     }
 
-    const serialized = JSON.stringify(visual);
-    if (localStorage.getItem(layoutStorageKey(board.id)) !== serialized) {
-      localStorage.setItem(layoutStorageKey(board.id), serialized);
+    // Only persist when the column count still matches the saved layout; a
+    // reflowed view must not overwrite the canonical arrangement.
+    if (!saved || saved.length === count) {
+      const serialized = JSON.stringify(visual);
+      if (localStorage.getItem(layoutStorageKey(board.id)) !== serialized) {
+        localStorage.setItem(layoutStorageKey(board.id), serialized);
+      }
     }
     return visual;
   }

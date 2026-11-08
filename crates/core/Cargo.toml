@@ -8,6 +8,7 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1.0"
+base64 = "0.22"
 hmac = "0.12"
 hex = "0.4"
 regex = "1.11"

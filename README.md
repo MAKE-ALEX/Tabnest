@@ -279,6 +279,16 @@ docker compose start
 - 文件夹里的直接书签 → 该文件夹对应面板的「全部」分组
 - 重复网址（已存在数据库中的）自动跳过
 
+### HTML 导出也带排版
+
+`tabnest-bookmarks.html` 里会额外写一行 base64 注释（浏览器会忽略）：
+
+```
+<!-- tabnest-meta:<base64 JSON> -->
+```
+
+里面是主题 / 配色 / 每行列数，以及每个面板「哪几个分组在哪一竖列」。用 Tabnest 再导入时会读取它、按分组名还原排版；导入 Chrome / Edge / Firefox 时这行注释被忽略，不影响书签结构。
+
 ## 开发
 
 ```bash

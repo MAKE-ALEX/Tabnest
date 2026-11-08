@@ -607,11 +607,32 @@ async fn import_html(State(state): State<AppState>, body: String) -> AppResult<J
     if body.len() > 20 * 1024 * 1024 {
         return Err(AppError::bad_request("文件太大"));
     }
+    let meta = tabnest_core::import::parse_html_meta(&body);
     let boards = tabnest_core::import::parse_netscape(&body);
     if boards.len() > 500 {
         return Err(AppError::bad_request("面板数量过多（最多 500 个）"));
     }
-    let (stats, _) = db::import_boards(&state.db, boards).await?;
+    let (stats, imported) = db::import_boards(&state.db, boards).await?;
+
+    if let Some(meta) = meta {
+        for (board_id, layout) in tabnest_core::import::match_layouts(&meta, &imported) {
+            if let Err(error) = db::save_layout(&state.db, board_id, &layout).await {
+                worker::console_warn!("html layout restore failed: {}", error.message);
+            }
+        }
+        if let Some(appearance) = meta.appearance {
+            let update = SettingsUpdate {
+                theme: appearance.theme,
+                palette: appearance.palette,
+                columns: appearance.columns,
+                active_board: None,
+            };
+            if let Err(error) = db::save_settings(&state.db, update).await {
+                worker::console_warn!("html appearance restore failed: {}", error.message);
+            }
+        }
+    }
+
     Ok(Json(json!({ "ok": true, "stats": stats })))
 }
 
@@ -680,14 +701,57 @@ async fn export_json(State(state): State<AppState>) -> AppResult<Response> {
 #[worker::send]
 async fn export_html(State(state): State<AppState>) -> AppResult<Response> {
     let snapshot = db::load_state(&state.db).await?;
+    let settings = db::load_settings(&state.db).await?;
     let mut html = String::from(
         "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n\
          <!-- This is an automatically generated file. -->\n\
          <META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html; charset=UTF-8\">\n\
          <TITLE>Bookmarks</TITLE>\n\
-         <H1>Tabnest Bookmarks</H1>\n\
-         <DL><p>\n",
+         <H1>Tabnest Bookmarks</H1>\n",
     );
+
+    // Netscape HTML cannot express the masonry layout; carry it in a base64
+    // comment that browsers ignore and Tabnest reads back on import.
+    let meta = tabnest_core::import::LayoutMeta {
+        appearance: Some(tabnest_core::import::ImportAppearance {
+            theme: settings.theme.clone(),
+            palette: settings.palette.clone(),
+            columns: settings.columns.clone(),
+            active_board: settings.active_board,
+        }),
+        boards: snapshot
+            .boards
+            .iter()
+            .map(|board| {
+                let names: std::collections::HashMap<i64, &str> = board
+                    .columns
+                    .iter()
+                    .map(|column| (column.id, column.name.as_str()))
+                    .collect();
+                tabnest_core::import::BoardLayoutMeta {
+                    name: board.name.clone(),
+                    layout: settings
+                        .layouts
+                        .get(&board.id)
+                        .map(|groups| {
+                            groups
+                                .iter()
+                                .map(|group| {
+                                    group
+                                        .iter()
+                                        .filter_map(|id| names.get(id).map(|name| name.to_string()))
+                                        .collect()
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                }
+            })
+            .collect(),
+    };
+    html.push_str(&meta.to_comment());
+    html.push_str("\n<DL><p>\n");
+
     for board in &snapshot.boards {
         html.push_str(&format!(
             "    <DT><H3>{}</H3>\n    <DL><p>\n",

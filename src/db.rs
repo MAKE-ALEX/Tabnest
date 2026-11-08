@@ -244,6 +244,7 @@ pub async fn import_boards(
         }
 
         imported.push(ImportedBoard {
+            name: board_name,
             id: board_id,
             columns: inserted_columns,
             layout,
