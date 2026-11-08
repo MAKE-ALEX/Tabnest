@@ -599,7 +599,11 @@ async fn import_json(State(state): State<AppState>, body: String) -> AppResult<J
         }
     }
 
-    Ok(Json(json!({ "ok": true, "stats": stats })))
+    let imported_ids: Vec<i64> = imported.iter().map(|board| board.id).collect();
+
+    Ok(Json(
+        json!({ "ok": true, "stats": stats, "boards": imported_ids }),
+    ))
 }
 
 #[worker::send]
@@ -633,7 +637,11 @@ async fn import_html(State(state): State<AppState>, body: String) -> AppResult<J
         }
     }
 
-    Ok(Json(json!({ "ok": true, "stats": stats })))
+    let imported_ids: Vec<i64> = imported.iter().map(|board| board.id).collect();
+
+    Ok(Json(
+        json!({ "ok": true, "stats": stats, "boards": imported_ids }),
+    ))
 }
 
 #[worker::send]

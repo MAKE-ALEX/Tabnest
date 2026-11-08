@@ -416,6 +416,15 @@
   async function syncSettingsFromServer() {
     try {
       const settings = await api('/api/settings');
+
+      // Seed the masonry layouts *before* anything can render, otherwise the
+      // first paint derives a fresh arrangement and (worse) caches it locally.
+      for (const [boardId, layout] of Object.entries(settings.layouts || {})) {
+        if (Array.isArray(layout)) {
+          localStorage.setItem(`tabnest.layout.${boardId}`, JSON.stringify(layout));
+        }
+      }
+
       if (settings.theme || settings.palette) {
         applyAppearance(settings.theme || state.mode, settings.palette || state.palette, true);
       }
@@ -423,11 +432,6 @@
       const activeBoard = Number(settings.active_board);
       if (Number.isFinite(activeBoard) && activeBoard > 0) {
         localStorage.setItem('tabnest.board', String(activeBoard));
-      }
-      for (const [boardId, layout] of Object.entries(settings.layouts || {})) {
-        if (Array.isArray(layout)) {
-          localStorage.setItem(`tabnest.layout.${boardId}`, JSON.stringify(layout));
-        }
       }
 
       // One-time migration for devices that still hold the old local-only
@@ -1547,9 +1551,17 @@
       const result = await api(endpoint, { method: 'POST', raw: text });
       const stats = result.stats || {};
       closeModal();
-      await refresh();
-      // The server restored appearance and per-board layout from the file.
+      // Settings (layouts included) must be seeded before the first render,
+      // otherwise the freshly imported board paints with an auto arrangement.
       await syncSettingsFromServer();
+      await refresh();
+      // Jump to the first imported board so the restored layout is on screen.
+      const firstImported = Array.isArray(result.boards) ? result.boards[0] : null;
+      if (firstImported && state.boards.some((board) => board.id === firstImported)) {
+        state.activeId = firstImported;
+        persistActive();
+        render();
+      }
       const skipped = stats.skipped ? `，跳过 ${stats.skipped} 个重复或无效网址` : '';
       toast(`导入完成：${stats.boards} 个面板、${stats.columns} 个分组、${stats.links} 个书签${skipped}`);
     } catch (error) {

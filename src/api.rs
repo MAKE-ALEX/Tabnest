@@ -903,7 +903,11 @@ async fn import_json(State(state): State<AppState>, body: String) -> AppResult<J
         }
     }
 
-    Ok(Json(json!({ "ok": true, "stats": stats })))
+    let imported_ids: Vec<i64> = imported.iter().map(|board| board.id).collect();
+
+    Ok(Json(
+        json!({ "ok": true, "stats": stats, "boards": imported_ids }),
+    ))
 }
 
 async fn import_html(State(state): State<AppState>, body: String) -> AppResult<Json<Value>> {
@@ -916,6 +920,8 @@ async fn import_html(State(state): State<AppState>, body: String) -> AppResult<J
         return Err(AppError::bad_request("面板数量过多（最多 500 个）"));
     }
     let (stats, imported) = crate::db::import_boards(&state.pool, boards).await?;
+
+    let imported_ids: Vec<i64> = imported.iter().map(|board| board.id).collect();
 
     if let Some(meta) = meta {
         for (board_id, layout) in tabnest_core::import::match_layouts(&meta, &imported) {
@@ -936,7 +942,9 @@ async fn import_html(State(state): State<AppState>, body: String) -> AppResult<J
         }
     }
 
-    Ok(Json(json!({ "ok": true, "stats": stats })))
+    Ok(Json(
+        json!({ "ok": true, "stats": stats, "boards": imported_ids }),
+    ))
 }
 
 async fn export_json(State(state): State<AppState>) -> AppResult<Response> {
