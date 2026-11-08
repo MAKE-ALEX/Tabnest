@@ -219,7 +219,7 @@ Cloudflare Worker → 设置 → 构建 → 连接 Git：
 | 构建命令 | `bash ci-build.sh` |
 | 部署命令 | `npx wrangler deploy` |
 
-`worker/ci-build.sh` 负责安装 wasm target 和 `worker-build`，并执行 `npm ci`。**建议打开「构建缓存」**，否则每次都要重新编译 `worker-build`（首次约 15 分钟，命中缓存后几分钟）。
+`worker/ci-build.sh` 负责安装 Rust（Cloudflare 构建镜像里没有）、wasm target 和 `worker-build`，并执行 `npm ci`。**建议打开「构建缓存」**，否则每次都要重新装 Rust、编译 `worker-build`（首次约 20 分钟，命中缓存后几分钟）。
 
 推送后也可以在 GitHub Actions 里部署：仓库已带 `.github/workflows/deploy-worker.yml`，配置 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID` 两个 secret 即可（未配置时会自动跳过）。两种方式选一个，不要同时开。
 
