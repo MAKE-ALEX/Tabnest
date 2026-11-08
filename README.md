@@ -231,7 +231,7 @@ npm run db:export      # 导出 tabnest-backup.sql
 
 所有内容都在一个 SQLite 文件里（`data/tabnest.db`）。三种备份方式：
 
-1. 右上角「数据」图标 → 导出 JSON，适合迁移和增量备份；
+1. 右上角「数据」图标 → 导出 JSON，适合迁移和增量备份（含面板、分组、书签顺序，以及主题 / 配色 / 每行列数等外观设置）；
 2. `mkdir -p backup && docker compose stop && cp data/tabnest.db backup/`；
 3. 使用 `sqlite3 data/tabnest.db ".backup 'backup.db'"`（WAL 模式下推荐，可在运行中执行）。
 

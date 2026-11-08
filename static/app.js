@@ -1364,9 +1364,9 @@
       <div class="modal-body">
         <section class="io-block">
           <h3>导出</h3>
-          <p>JSON 适合备份和迁移；HTML 可以直接导入 Chrome / Edge / Firefox。</p>
+          <p>JSON 备份包含面板、分组、书签和外观设置（主题 / 配色 / 每行列数）；HTML 可直接导入 Chrome / Edge / Firefox。</p>
           <div class="io-actions">
-            <a class="btn ghost" href="/api/export/json" download>${SVG.download} 导出 JSON</a>
+            <button type="button" class="btn ghost" data-act="export-json">${SVG.download} 导出 JSON</button>
             <a class="btn ghost" href="/api/export/html" download>${SVG.download} 导出 HTML</a>
           </div>
         </section>
@@ -1411,6 +1411,50 @@
     });
   }
 
+  function currentAppearance() {
+    return { theme: state.mode, palette: state.palette, columns: state.columns };
+  }
+
+  /// Restore theme/palette/column count from a Tabnest JSON export.
+  function applyImportedAppearance(raw) {
+    if (!raw || typeof raw !== 'object') return false;
+    const mode = MODES.some((item) => item.id === raw.theme) ? raw.theme : state.mode;
+    const palette = PALETTES.some((item) => item.id === raw.palette) ? raw.palette : state.palette;
+    let applied = false;
+    if (mode !== state.mode || palette !== state.palette) {
+      applyAppearance(mode, palette, true);
+      applied = true;
+    }
+    if (COLUMN_OPTIONS.some((item) => item.id === raw.columns) && raw.columns !== state.columns) {
+      applyColumns(raw.columns, true);
+      applied = true;
+    }
+    return applied;
+  }
+
+  async function exportJson() {
+    try {
+      const response = await fetch('/api/export/json', { credentials: 'same-origin' });
+      if (!response.ok) throw new Error(`导出失败（HTTP ${response.status}）`);
+      const payload = await response.json();
+      // The server only knows about content; appearance lives in this browser,
+      // so it is attached here before the file is saved.
+      payload.appearance = currentAppearance();
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'tabnest-bookmarks.json';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      toast('已导出 JSON（包含外观设置）');
+    } catch (error) {
+      toast(error.message || '导出失败', 'error');
+    }
+  }
+
   async function importFile(file) {
     const errorEl = $('#import-error');
     const drop = $('#import-drop');
@@ -1423,10 +1467,19 @@
       const text = await file.text();
       const result = await api(endpoint, { method: 'POST', raw: text });
       const stats = result.stats || {};
+      let restored = false;
+      if (isJson) {
+        try {
+          restored = applyImportedAppearance(JSON.parse(text)?.appearance);
+        } catch {
+          /* a malformed appearance block should not fail the import */
+        }
+      }
       closeModal();
       await refresh();
       const skipped = stats.skipped ? `，跳过 ${stats.skipped} 个重复或无效网址` : '';
-      toast(`导入完成：${stats.boards} 个面板、${stats.columns} 个分组、${stats.links} 个书签${skipped}`);
+      const appearance = restored ? '，已恢复外观设置' : '';
+      toast(`导入完成：${stats.boards} 个面板、${stats.columns} 个分组、${stats.links} 个书签${skipped}${appearance}`);
     } catch (error) {
       if (errorEl) errorEl.textContent = error.message;
       else toast(error.message, 'error');
@@ -1868,6 +1921,9 @@
         break;
       case 'clear-search':
         clearSearch();
+        break;
+      case 'export-json':
+        await exportJson();
         break;
       default:
         break;
