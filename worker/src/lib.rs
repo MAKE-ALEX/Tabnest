@@ -8,6 +8,7 @@ mod auth;
 mod config;
 mod db;
 mod error;
+mod favicon;
 mod fetch;
 mod security;
 mod state;

@@ -185,7 +185,7 @@ cargo test
 | 存储 | 本地 SQLite 文件 | Cloudflare D1 |
 | 登录会话 | 进程内 Map | HMAC 签名 Cookie（`SESSION_SECRET`） |
 | 登录限速 | 全局精确 | 每个 isolate 内存，多实例时是近似值 |
-| favicon | 服务端磁盘缓存 | 仅浏览器 / CDN 缓存 |
+| favicon | 服务端磁盘缓存 | Cloudflare 边缘缓存（按 URL，7 天，每个数据中心独立） |
 | 抓取网页元数据 | `reqwest` + DNS 钉扎防 SSRF | `fetch` + 字面量内网地址拦截（无法钉扎 DNS） |
 | 静态资源 | `include_str!` 编进二进制 | Cloudflare Static Assets，`static/_headers` 提供 CSP |
 
@@ -223,7 +223,7 @@ cd worker
 npm run db:export      # 导出 tabnest-backup.sql
 ```
 
-> Workers 免费额度是每天 10 万次请求、D1 免费 5 GB；favicon 代理与元数据抓取都算子请求。未设置 `APP_PASSWORD` 时任何人都能读写，请务必配置。
+> Workers 免费额度是每天 10 万次请求、D1 免费 5 GB；favicon 会先查边缘缓存，未命中才发起外部抓取。未设置 `APP_PASSWORD` 时任何人都能读写，请务必配置。
 >
 > Workers 版的会话是无状态签名 Cookie：退出登录只会清掉浏览器里的 Cookie，已泄露的令牌在 7 天有效期内仍然可用（自托管版退出即服务端失效）。共用设备上建议缩短 `SESSION_TTL_SECS` 或更换 `SESSION_SECRET` 强制全员下线。
 

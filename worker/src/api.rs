@@ -17,7 +17,6 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tabnest_core::html::truncate_chars;
 use tabnest_core::url::{host_label, normalize_url};
-use tabnest_core::image::sniff_image;
 
 use crate::{
     auth, db,
@@ -515,37 +514,7 @@ async fn favicon_handler(
     State(state): State<AppState>,
     Query(query): Query<IconQuery>,
 ) -> AppResult<Response> {
-    let url = normalize_url(&query.u).map_err(AppError::bad_request)?;
-    let (bytes, content_type, _) =
-        fetch::fetch_limited(&url, 512 * 1024, state.cfg.allow_private_network)
-            .await
-            .map_err(|_| AppError::not_found("图标不可用"))?;
-    let Some(kind) = sniff_image(&bytes, &content_type) else {
-        return Err(AppError::not_found("图标不是有效的图片"));
-    };
-    Ok(image_response(bytes, kind))
-}
-
-fn image_response(bytes: Vec<u8>, content_type: &'static str) -> Response {
-    let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("private, max-age=604800, immutable"),
-    );
-    headers.insert(
-        header::X_CONTENT_TYPE_OPTIONS,
-        HeaderValue::from_static("nosniff"),
-    );
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'none'; sandbox"),
-    );
-    headers.insert(
-        header::CONTENT_DISPOSITION,
-        HeaderValue::from_static("inline; filename=\"favicon\""),
-    );
-    (headers, bytes).into_response()
+    crate::favicon::serve(&state, &query.u).await
 }
 
 /* ------------------------------------------------------------------ */
