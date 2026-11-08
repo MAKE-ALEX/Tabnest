@@ -18,7 +18,7 @@ const MAX_BOARDS: usize = 500;
 const MAX_COLUMNS: usize = 2000;
 
 fn dberr(error: worker::Error) -> AppError {
-    worker::console_error!("d1 error: {error}");
+    worker::console_error!("d1 error: {error} ({error:?})");
     AppError::internal("数据库操作失败")
 }
 
@@ -93,7 +93,17 @@ fn text(value: &str) -> D1Type<'_> {
 const SCHEMA: &str = include_str!("../schema.sql");
 
 pub async fn bootstrap(db: &D1Database, seed_demo: bool) -> AppResult<()> {
-    db.exec(SCHEMA).await.map_err(dberr)?;
+    // D1's `exec()` support for multi-statement strings differs between the
+    // runtime and Miniflare, so apply the schema as an atomic batch instead.
+    let mut statements = Vec::new();
+    for statement in SCHEMA.split(';') {
+        let statement = statement.trim();
+        if statement.is_empty() {
+            continue;
+        }
+        statements.push(db.prepare(statement));
+    }
+    db.batch(statements).await.map_err(dberr)?;
     if !seed_demo {
         return Ok(());
     }
