@@ -22,41 +22,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust (wasm target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "."
-
-      # `worker-build` compiles from source (~15 min); cache the binary so
-      # later deploys only rebuild the crate itself.
-      - name: Cache worker-build
-        id: worker-build-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/worker-build
-          key: worker-build-0.8.7-${{ runner.os }}
-
-      - name: Install worker-build
-        if: steps.worker-build-cache.outputs.cache-hit != 'true'
-        run: cargo install worker-build --locked --version 0.8.7
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: worker/package-lock.json
-
-      - name: Install worker dependencies
-        working-directory: worker
-        run: npm ci
-
       # The workflow is committed before the repository secrets exist; skip the
-      # deploy instead of failing every push.
+      # whole build instead of failing or wasting 20 minutes compiling.
       - name: Check credentials
         id: guard
         env:
@@ -64,11 +31,49 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo "::warning::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID 未配置，跳过部署"
+            echo "::notice::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID 未配置，跳过部署"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Install Rust (wasm target)
+        if: steps.guard.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo
+        if: steps.guard.outputs.skip != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+
+      # `worker-build` compiles from source (~15 min); cache the binary so later
+      # deploys only rebuild the crate itself.
+      - name: Cache worker-build
+        if: steps.guard.outputs.skip != 'true'
+        id: worker-build-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/worker-build
+          key: worker-build-0.8.7-${{ runner.os }}
+
+      - name: Install worker-build
+        if: steps.guard.outputs.skip != 'true' && steps.worker-build-cache.outputs.cache-hit != 'true'
+        run: cargo install worker-build --locked --version 0.8.7
+
+      - uses: actions/setup-node@v4
+        if: steps.guard.outputs.skip != 'true'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      - name: Install worker dependencies
+        if: steps.guard.outputs.skip != 'true'
+        working-directory: worker
+        run: npm ci
 
       - name: Deploy
         if: steps.guard.outputs.skip != 'true'
