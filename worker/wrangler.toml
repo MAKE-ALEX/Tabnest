@@ -1,0 +1,36 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "tabnest"
+# `worker-build` emits this shim (plus the wasm bundle) from src/lib.rs.
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-11-01"
+compatibility_flags = []
+workers_dev = true
+preview_urls = false
+
+[build]
+command = "worker-build --release"
+
+# 1) `npx wrangler d1 create tabnest`
+# 2) paste the returned database_id below (or run `npm run db:create`)
+[[d1_databases]]
+binding = "DB"
+database_name = "tabnest"
+database_id = "ce0b2f18-a411-4a71-9591-7bc1de1c7d47"
+
+# Static files are served by Cloudflare directly; only the API and the health
+# probe reach the Worker itself, which keeps CPU/requests low.
+[assets]
+directory = "../static"
+binding = "ASSETS"
+run_worker_first = ["/api/*", "/healthz"]
+
+[vars]
+# Never put APP_PASSWORD or SESSION_SECRET here; use
+#   npx wrangler secret put APP_PASSWORD
+#   npx wrangler secret put SESSION_SECRET
+SEED_DEMO = "false"
+COOKIE_SECURE = "true"
+ALLOW_PRIVATE_NETWORK = "false"
+
+[observability]
+enabled = true

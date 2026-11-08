@@ -13,7 +13,7 @@ use axum::{
     routing::{get, patch, post, put},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 use sqlx::SqlitePool;
@@ -22,7 +22,8 @@ use crate::{
     auth::{self, clear_cookie, constant_time_eq, session_cookie, LoginCheck},
     error::{AppError, AppResult},
     fetch::{
-        fetch_limited, fetch_meta, host_label, normalize_url, sniff_image, truncate_chars,
+        extract_icon, fetch_limited, fetch_meta, host_label, normalize_url, sniff_image,
+        truncate_chars,
     },
     import,
     state::AppState,
@@ -71,39 +72,7 @@ pub fn router(state: AppState) -> Router {
 /* DTOs                                                                */
 /* ------------------------------------------------------------------ */
 
-#[derive(Serialize)]
-pub struct StateDto {
-    pub boards: Vec<BoardDto>,
-}
-
-#[derive(Serialize)]
-pub struct BoardDto {
-    pub id: i64,
-    pub name: String,
-    pub position: i64,
-    pub columns: Vec<ColumnDto>,
-}
-
-#[derive(Serialize)]
-pub struct ColumnDto {
-    pub id: i64,
-    pub board_id: i64,
-    pub name: String,
-    pub position: i64,
-    pub links: Vec<LinkDto>,
-}
-
-#[derive(Serialize)]
-pub struct LinkDto {
-    pub id: i64,
-    pub column_id: i64,
-    pub title: String,
-    pub url: String,
-    pub note: String,
-    pub icon: Option<String>,
-    pub position: i64,
-    pub created_at: String,
-}
+pub use tabnest_core::dto::{BoardDto, ColumnDto, LinkDto, StateDto};
 
 pub async fn load_state(pool: &SqlitePool) -> AppResult<StateDto> {
     let boards: Vec<(i64, String, i64)> =
@@ -733,22 +702,75 @@ async fn favicon_handler(
         let _ = tokio::fs::remove_file(&path).await;
     }
 
-    let (bytes, content_type, _) =
-        fetch_limited(&url, 512 * 1024, state.cfg.allow_private_network)
-            .await
-            .map_err(|error| {
-                tracing::debug!(%error, %url, "favicon fetch failed");
-                AppError::not_found("图标不可用")
-            })?;
-    let Some(kind) = sniff_image(&bytes, &content_type) else {
-        return Err(AppError::not_found("图标不是有效的图片"));
-    };
+    let (bytes, kind) = resolve_icon(&url, state.cfg.allow_private_network)
+        .await
+        .map_err(|error| {
+            tracing::debug!(%url, "favicon resolve failed: {}", error.message);
+            error
+        })?;
     if let Err(error) = tokio::fs::write(&path, &bytes).await {
         tracing::warn!(%error, "favicon cache write failed");
     } else {
         prune_favicon_cache(&cache_dir).await;
     }
     Ok(image_response(bytes, kind))
+}
+
+/// Turn whatever the caller passed into a raster icon.
+///
+/// Imported bookmarks have no icon URL, so the front-end sends the page URL
+/// instead. In that case the HTML is parsed for `<link rel="icon">` (which is
+/// often an SVG we refuse to serve) and `/favicon.ico` is the last resort.
+async fn resolve_icon(url: &str, allow_private: bool) -> AppResult<(Vec<u8>, &'static str)> {
+    let (bytes, content_type, final_url) = fetch_limited(url, 1_500_000, allow_private)
+        .await
+        .map_err(|_| AppError::not_found("图标不可用"))?;
+
+    if let Some(kind) = sniff_image(&bytes, &content_type) {
+        return Ok((bytes, kind));
+    }
+
+    if content_type.is_empty()
+        || content_type.contains("html")
+        || content_type.contains("text")
+        || content_type.contains("xml")
+    {
+        let html = String::from_utf8_lossy(&bytes);
+        if let Some(icon) = extract_icon(&html, &final_url) {
+            if let Ok((bytes, kind)) = fetch_raster(&icon, allow_private).await {
+                return Ok((bytes, kind));
+            }
+        }
+    }
+
+    if let Some(candidate) = origin_favicon(&final_url) {
+        if candidate != url {
+            if let Ok((bytes, kind)) = fetch_raster(&candidate, allow_private).await {
+                return Ok((bytes, kind));
+            }
+        }
+    }
+
+    Err(AppError::not_found("图标不可用"))
+}
+
+async fn fetch_raster(url: &str, allow_private: bool) -> AppResult<(Vec<u8>, &'static str)> {
+    let (bytes, content_type, _) = fetch_limited(url, 512 * 1024, allow_private)
+        .await
+        .map_err(|_| AppError::not_found("图标不可用"))?;
+    match sniff_image(&bytes, &content_type) {
+        Some(kind) => Ok((bytes, kind)),
+        None => Err(AppError::not_found("图标不是有效的图片")),
+    }
+}
+
+fn origin_favicon(page_url: &str) -> Option<String> {
+    let parsed = url::Url::parse(page_url).ok()?;
+    let origin = parsed.origin().ascii_serialization();
+    if origin == "null" {
+        return None;
+    }
+    Some(format!("{origin}/favicon.ico"))
 }
 
 const FAVICON_CACHE_MAX_FILES: usize = 1000;

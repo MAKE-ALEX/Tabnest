@@ -1,0 +1,11 @@
+# Headers applied by Cloudflare Static Assets to the SPA shell and its assets.
+# Mirrors `tabnest_core::security::CSP` so the Workers build keeps the same
+# policies as the native server.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  X-Content-Type-Options: nosniff
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
+  Cross-Origin-Resource-Policy: same-origin
+  Strict-Transport-Security: max-age=31536000; includeSubDomains

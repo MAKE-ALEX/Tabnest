@@ -724,12 +724,15 @@
   function renderLink(link, options = {}) {
     const draggable = options.draggable !== false;
     const letter = initial(link.title || link.url);
-    const icon = link.icon
-      ? `<img src="/api/favicon?u=${encodeURIComponent(link.icon)}" alt="" loading="lazy">`
+    // Imported bookmarks carry no icon URL; fall back to the page URL so the
+    // server can resolve <link rel="icon"> (or /favicon.ico) and cache it.
+    const iconSrc = link.icon || link.url;
+    const icon = iconSrc
+      ? `<img src="/api/favicon?u=${encodeURIComponent(iconSrc)}" alt="" loading="lazy">`
       : '';
     return `<article class="link-card" ${draggable ? 'draggable="true"' : ''} data-link-id="${link.id}" data-column-id="${link.column_id}" title="${attr(link.note || link.url)}">
       <a class="link-main" href="${attr(link.url)}" target="_blank" rel="noopener noreferrer" draggable="false">
-        <span class="favicon ${tint(link.title)} ${link.icon ? '' : 'no-icon'}" data-letter="${attr(letter)}">
+        <span class="favicon ${tint(link.title)}" data-letter="${attr(letter)}">
           <span class="fallback">${esc(letter)}</span>${icon}
         </span>
         <span class="link-text">
@@ -1244,14 +1247,15 @@
     };
     let metaSeq = 0;
 
-    function updatePreview(icon, label) {
+    function updatePreview(icon, label, pageUrl) {
       const preview = $('#link-preview');
       if (!preview) return;
       const letter = initial(label || '?');
-      preview.className = `favicon ${tint(label || '')}${icon ? '' : ' no-icon'}`;
+      const src = icon || pageUrl;
+      preview.className = `favicon ${tint(label || '')}`;
       preview.dataset.letter = letter;
       preview.innerHTML = `<span class="fallback">${esc(letter)}</span>${
-        icon ? `<img src="/api/favicon?u=${encodeURIComponent(icon)}" alt="">` : ''
+        src ? `<img src="/api/favicon?u=${encodeURIComponent(src)}" alt="">` : ''
       }`;
     }
 
@@ -1266,13 +1270,13 @@
         if (seq !== metaSeq || urlInput.value.trim() !== raw) return;
         if (!titleInput.value.trim() && meta.title) titleInput.value = meta.title;
         iconState = { icon: meta.icon || null, url: meta.url || normalized };
-        updatePreview(iconState.icon, meta.title || hostOf(normalized));
+        updatePreview(iconState.icon, meta.title || hostOf(normalized), iconState.url);
       } catch (error) {
         /* metadata is best effort; saving will retry on the server */
       }
     }
 
-    updatePreview(existing?.icon || null, existing?.title || hostOf(existing?.url || ''));
+    updatePreview(existing?.icon || null, existing?.title || hostOf(existing?.url || ''), existing?.url);
     urlInput.addEventListener('blur', () => {
       void hydrateMeta();
     });

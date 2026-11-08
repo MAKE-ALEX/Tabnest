@@ -174,6 +174,59 @@ APP_PASSWORD='你的密码' DATA_DIR=./data BIND_ADDR=127.0.0.1:8420 ./target/re
 cargo test
 ```
 
+## 部署到 Cloudflare Workers
+
+同一份代码也能跑在 Cloudflare Workers 上：`worker/` 是 Workers 入口，`crates/core` 放服务端和边缘端共用的纯逻辑（网址规范化、标题/图标解析、书签导入、签名 Cookie）。
+
+**与自托管版的差异**
+
+| 项目 | 自托管（Docker / 二进制） | Cloudflare Workers |
+| --- | --- | --- |
+| 存储 | 本地 SQLite 文件 | Cloudflare D1 |
+| 登录会话 | 进程内 Map | HMAC 签名 Cookie（`SESSION_SECRET`） |
+| 登录限速 | 全局精确 | 每个 isolate 内存，多实例时是近似值 |
+| favicon | 服务端磁盘缓存 | Cloudflare 边缘缓存（按 URL，7 天，每个数据中心独立） |
+| 抓取网页元数据 | `reqwest` + DNS 钉扎防 SSRF | `fetch` + 字面量内网地址拦截（无法钉扎 DNS） |
+| 静态资源 | `include_str!` 编进二进制 | Cloudflare Static Assets，`static/_headers` 提供 CSP |
+
+**步骤**
+
+```bash
+cd worker
+npm install
+
+# 1. 建库，把返回的 database_id 填进 wrangler.toml
+npx wrangler d1 create tabnest
+
+# 2. 配置密码与会话密钥（不要写进 wrangler.toml）
+npx wrangler secret put APP_PASSWORD
+npx wrangler secret put SESSION_SECRET   # 可省略，省略时由密码派生
+
+# 3. 部署
+npm run deploy
+```
+
+首次请求会自动执行 `worker/schema.sql`（`CREATE TABLE IF NOT EXISTS`）并按 `SEED_DEMO` 写入示例面板，不需要手动迁移。
+
+本地调试：
+
+```bash
+cd worker
+cp .dev.vars.example .dev.vars
+npm run dev            # http://localhost:8787，D1 由 Miniflare 本地模拟
+```
+
+备份与恢复：
+
+```bash
+cd worker
+npm run db:export      # 导出 tabnest-backup.sql
+```
+
+> Workers 免费额度是每天 10 万次请求、D1 免费 5 GB；favicon 会先查边缘缓存，未命中才发起外部抓取。未设置 `APP_PASSWORD` 时任何人都能读写，请务必配置。
+>
+> Workers 版的会话是无状态签名 Cookie：退出登录只会清掉浏览器里的 Cookie，已泄露的令牌在 7 天有效期内仍然可用（自托管版退出即服务端失效）。共用设备上建议缩短 `SESSION_TTL_SECS` 或更换 `SESSION_SECRET` 强制全员下线。
+
 ## 数据与备份
 
 所有内容都在一个 SQLite 文件里（`data/tabnest.db`）。三种备份方式：
@@ -220,12 +273,13 @@ cargo run
 src/main.rs        启动、日志、优雅退出
 src/api.rs         JSON API、排序、导入导出接口
 src/db.rs          SQLite 连接、建表、示例数据、批量导入
-src/fetch.rs       网址规范化、网页标题 / favicon 抓取、HTML 实体解码
-src/import.rs      Netscape 书签 HTML 解析
+src/fetch.rs       网页标题 / favicon 抓取（解析逻辑在 crates/core）
 src/auth.rs        可选密码、Cookie 会话
 src/assets.rs      内嵌前端资源与健康检查
+crates/core/       服务端与 Workers 共用的纯逻辑（URL、HTML 解析、导入、签名 Cookie）
+worker/            Cloudflare Workers 入口（D1 + Static Assets）
 static/            原生前端
-migrations/        SQLite schema
+migrations/        SQLite schema（自托管）
 ```
 
 ### API 摘要（均需登录，若启用密码）
