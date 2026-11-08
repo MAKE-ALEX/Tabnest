@@ -1,6 +1,7 @@
 #:schema node_modules/wrangler/config-schema.json
 name = "tabnest"
-main = "src/lib.rs"
+# `worker-build` emits this shim (plus the wasm bundle) from src/lib.rs.
+main = "build/worker/shim.mjs"
 compatibility_date = "2026-11-01"
 compatibility_flags = []
 
