@@ -1,0 +1,16 @@
+# Cloudflare Workers Static Assets rewrites (status 200 = serve the target
+# without changing the browser URL). Keeps the paths embedded in index.html
+# and the legacy `/g` share route working.
+/g /index.html 200
+
+/app-20261031g.js /app.js 200
+/app-20261031h.js /app.js 200
+/app-20261031i.js /app.js 200
+
+/theme-init-20261031g.js /theme-init.js 200
+/theme-init-20261031h.js /theme-init.js 200
+/theme-init-20261031i.js /theme-init.js 200
+
+/style-20261031g.css /style.css 200
+/style-20261031h.css /style.css 200
+/style-20261031i.css /style.css 200

@@ -1,0 +1,17 @@
+{
+  "name": "tabnest-worker",
+  "private": true,
+  "description": "Deploy Tabnest to Cloudflare Workers (D1 + Static Assets)",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:create": "wrangler d1 create tabnest",
+    "db:migrate": "wrangler d1 execute tabnest --remote --file=./schema.sql",
+    "db:export": "wrangler d1 export tabnest --remote --output=tabnest-backup.sql",
+    "secret:password": "wrangler secret put APP_PASSWORD",
+    "secret:session": "wrangler secret put SESSION_SECRET"
+  },
+  "devDependencies": {
+    "wrangler": "^4.40.0"
+  }
+}

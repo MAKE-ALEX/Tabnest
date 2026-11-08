@@ -6,3 +6,10 @@
 *.db-wal
 .env
 .DS_Store
+
+# Cloudflare Workers build artifacts
+/worker/target
+/worker/build
+/worker/node_modules
+/worker/.wrangler
+/worker/.dev.vars

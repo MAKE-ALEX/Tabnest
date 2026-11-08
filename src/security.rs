@@ -4,23 +4,12 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use url::Url;
+
+use tabnest_core::security::{is_same_origin, OriginCheck};
 
 use crate::error::AppError;
 
-const CSP: &str = "default-src 'self'; \
-                   script-src 'self'; \
-                   style-src 'self'; \
-                   img-src 'self' data:; \
-                   font-src 'self'; \
-                   connect-src 'self'; \
-                   object-src 'none'; \
-                   base-uri 'none'; \
-                   frame-ancestors 'none'; \
-                   form-action 'self'";
-
-const PERMISSIONS_POLICY: &str =
-    "camera=(), microphone=(), geolocation=(), payment=(), usb=()";
+pub use tabnest_core::security::{CSP, PERMISSIONS_POLICY};
 
 /// Security headers for every response, including static assets and errors.
 pub async fn security_headers(request: Request, next: Next) -> Response {
@@ -84,9 +73,9 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
     response
 }
 
-/// Reject cross-site state-changing requests. Browsers send `Origin` on
-/// POST/PUT/PATCH/DELETE; `Sec-Fetch-Site` catches modern same-site (different
-/// port) cases that `SameSite=Lax` does not cover.
+/// Reject cross-site state-changing requests. The header semantics live in
+/// [`tabnest_core::security::is_same_origin`] so the Workers build applies the
+/// exact same rule.
 pub async fn csrf_guard(request: Request, next: Next) -> Result<Response, AppError> {
     let method = request.method().clone();
     if matches!(
@@ -100,76 +89,15 @@ pub async fn csrf_guard(request: Request, next: Next) -> Result<Response, AppErr
 }
 
 fn request_is_same_origin(headers: &HeaderMap) -> bool {
-    if let Some(site) = header_str(headers, "sec-fetch-site") {
-        let site = site.to_ascii_lowercase();
-        if site == "cross-site" || site == "same-site" {
-            return false;
-        }
-    }
-
-    let Some(origin) = header_str(headers, header::ORIGIN.as_str()) else {
-        // Non-browser clients (curl) do not send Origin. They also do not carry
-        // a victim's browser session, so allow them to keep the API usable.
-        return true;
-    };
-    if origin.eq_ignore_ascii_case("null") {
-        return false;
-    }
-
-    let Ok(origin_url) = Url::parse(origin) else {
-        return false;
-    };
-    let Some(host_header) = header_str(headers, header::HOST.as_str()) else {
-        return false;
-    };
-    authority_matches(&origin_url, host_header, headers)
-}
-
-fn authority_matches(origin: &Url, host_header: &str, headers: &HeaderMap) -> bool {
-    let Some(origin_host) = origin.host_str() else {
-        return false;
-    };
-    let origin_host = origin_host
-        .trim_start_matches('[')
-        .trim_end_matches(']');
-    let Some(origin_port) = origin.port_or_known_default() else {
-        return false;
-    };
-    let Some((host, explicit_port)) = split_host_header(host_header) else {
-        return false;
-    };
-    if !host.eq_ignore_ascii_case(origin_host) {
-        return false;
-    }
-
     let forwarded_https = header_str(headers, "x-forwarded-proto")
         .map(|value| value.eq_ignore_ascii_case("https"))
         .unwrap_or(false);
-    let default_port = if forwarded_https { 443 } else { 80 };
-    let port = explicit_port.unwrap_or(default_port);
-    port == origin_port
-}
-
-fn split_host_header(value: &str) -> Option<(String, Option<u16>)> {
-    let value = value.trim();
-    if let Some(rest) = value.strip_prefix('[') {
-        let end = rest.find(']')?;
-        let host = &rest[..end];
-        let after = &rest[end + 1..];
-        if after.is_empty() {
-            return Some((host.to_string(), None));
-        }
-        let port = after.strip_prefix(':')?.parse().ok()?;
-        return Some((host.to_string(), Some(port)));
-    }
-
-    match value.rsplit_once(':') {
-        Some((host, port)) if !host.contains(':') => {
-            Some((host.to_string(), Some(port.parse().ok()?)))
-        }
-        Some(_) => None,
-        None => Some((value.to_string(), None)),
-    }
+    is_same_origin(&OriginCheck {
+        host: header_str(headers, header::HOST.as_str()),
+        origin: header_str(headers, header::ORIGIN.as_str()),
+        sec_fetch_site: header_str(headers, "sec-fetch-site"),
+        forwarded_https,
+    })
 }
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {

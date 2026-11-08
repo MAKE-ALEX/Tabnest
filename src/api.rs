@@ -13,7 +13,7 @@ use axum::{
     routing::{get, patch, post, put},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 use sqlx::SqlitePool;
@@ -71,39 +71,7 @@ pub fn router(state: AppState) -> Router {
 /* DTOs                                                                */
 /* ------------------------------------------------------------------ */
 
-#[derive(Serialize)]
-pub struct StateDto {
-    pub boards: Vec<BoardDto>,
-}
-
-#[derive(Serialize)]
-pub struct BoardDto {
-    pub id: i64,
-    pub name: String,
-    pub position: i64,
-    pub columns: Vec<ColumnDto>,
-}
-
-#[derive(Serialize)]
-pub struct ColumnDto {
-    pub id: i64,
-    pub board_id: i64,
-    pub name: String,
-    pub position: i64,
-    pub links: Vec<LinkDto>,
-}
-
-#[derive(Serialize)]
-pub struct LinkDto {
-    pub id: i64,
-    pub column_id: i64,
-    pub title: String,
-    pub url: String,
-    pub note: String,
-    pub icon: Option<String>,
-    pub position: i64,
-    pub created_at: String,
-}
+pub use tabnest_core::dto::{BoardDto, ColumnDto, LinkDto, StateDto};
 
 pub async fn load_state(pool: &SqlitePool) -> AppResult<StateDto> {
     let boards: Vec<(i64, String, i64)> =

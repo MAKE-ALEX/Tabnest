@@ -1,0 +1,9 @@
+# Local-only values for `wrangler dev`. Copy to `.dev.vars` (git-ignored).
+# In production set these with `wrangler secret put`.
+APP_PASSWORD=dev-password
+SESSION_SECRET=dev-only-session-secret
+SEED_DEMO=true
+# `wrangler dev` serves plain HTTP on localhost, so the Secure cookie would be
+# dropped by browsers.
+COOKIE_SECURE=false
+ALLOW_PRIVATE_NETWORK=false
