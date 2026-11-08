@@ -224,6 +224,8 @@ npm run db:export      # 导出 tabnest-backup.sql
 ```
 
 > Workers 免费额度是每天 10 万次请求、D1 免费 5 GB；favicon 代理与元数据抓取都算子请求。未设置 `APP_PASSWORD` 时任何人都能读写，请务必配置。
+>
+> Workers 版的会话是无状态签名 Cookie：退出登录只会清掉浏览器里的 Cookie，已泄露的令牌在 7 天有效期内仍然可用（自托管版退出即服务端失效）。共用设备上建议缩短 `SESSION_TTL_SECS` 或更换 `SESSION_SECRET` 强制全员下线。
 
 ## 数据与备份
 
