@@ -13,7 +13,7 @@ command = "worker-build --release"
 [[d1_databases]]
 binding = "DB"
 database_name = "tabnest"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "ce0b2f18-a411-4a71-9591-7bc1de1c7d47"
 
 # Static files are served by Cloudflare directly; only the API and the health
 # probe reach the Worker itself, which keeps CPU/requests low.
