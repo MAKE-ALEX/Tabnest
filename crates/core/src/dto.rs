@@ -1,6 +1,9 @@
-//! Response payloads for `GET /api/state` and the JSON export.
+//! Response payloads for `GET /api/state` / `GET /api/settings` and the JSON
+//! export, plus the shared preference types used by both runtimes.
 
-use serde::Serialize;
+use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
 pub struct StateDto {
@@ -34,4 +37,31 @@ pub struct LinkDto {
     pub icon: Option<String>,
     pub position: i64,
     pub created_at: String,
+}
+
+/// Everything the UI used to keep in `localStorage`, now shared across devices.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct SettingsDto {
+    pub theme: Option<String>,
+    pub palette: Option<String>,
+    pub columns: Option<String>,
+    pub active_board: Option<i64>,
+    /// board id -> masonry columns (`[[column_id, ...], ...]`).
+    #[serde(default)]
+    pub layouts: HashMap<i64, Vec<Vec<i64>>>,
+}
+
+/// Partial update for the preference fields.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct SettingsUpdate {
+    pub theme: Option<String>,
+    pub palette: Option<String>,
+    pub columns: Option<String>,
+    pub active_board: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LayoutUpdate {
+    pub layout: Vec<Vec<i64>>,
 }

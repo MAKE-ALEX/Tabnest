@@ -32,3 +32,18 @@ CREATE TABLE IF NOT EXISTS links (
 CREATE INDEX IF NOT EXISTS idx_columns_board ON columns(board_id, position);
 CREATE INDEX IF NOT EXISTS idx_links_column ON links(column_id, position);
 CREATE INDEX IF NOT EXISTS idx_links_url ON links(url);
+
+-- Server-side UI preferences so several devices share one look.
+CREATE TABLE IF NOT EXISTS settings (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    theme        TEXT,
+    palette      TEXT,
+    columns      TEXT,
+    active_board INTEGER,
+    updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS board_layouts (
+    board_id INTEGER PRIMARY KEY REFERENCES boards(id) ON DELETE CASCADE,
+    layout   TEXT    NOT NULL
+);

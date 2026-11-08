@@ -49,6 +49,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/links/{id}", patch(update_link).delete(delete_link))
         .route("/api/meta", get(meta_handler))
         .route("/api/favicon", get(favicon_handler))
+        .route(
+            "/api/settings",
+            get(settings_handler).put(save_settings_handler),
+        )
+        .route(
+            "/api/settings/layouts/{id}",
+            put(save_layout_handler),
+        )
         .route("/api/import/json", post(import_json))
         .route("/api/import/html", post(import_html))
         .route("/api/export/json", get(export_json))
@@ -72,7 +80,8 @@ pub fn router(state: AppState) -> Router {
 /* DTOs                                                                */
 /* ------------------------------------------------------------------ */
 
-pub use tabnest_core::dto::{BoardDto, ColumnDto, LinkDto, StateDto};
+pub use tabnest_core::dto::{BoardDto, ColumnDto, LinkDto, SettingsDto, StateDto};
+use tabnest_core::dto::{LayoutUpdate, SettingsUpdate};
 
 pub async fn load_state(pool: &SqlitePool) -> AppResult<StateDto> {
     let boards: Vec<(i64, String, i64)> =
@@ -823,11 +832,41 @@ fn image_response(bytes: Vec<u8>, content_type: &'static str) -> Response {
 }
 
 /* ------------------------------------------------------------------ */
+/* Settings (shared across devices)                                    */
+/* ------------------------------------------------------------------ */
+
+async fn settings_handler(State(state): State<AppState>) -> AppResult<Json<SettingsDto>> {
+    Ok(Json(crate::db::load_settings(&state.pool).await?))
+}
+
+async fn save_settings_handler(
+    State(state): State<AppState>,
+    Json(body): Json<SettingsUpdate>,
+) -> AppResult<Json<Value>> {
+    crate::db::save_settings(&state.pool, body).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn save_layout_handler(
+    State(state): State<AppState>,
+    Path(board_id): Path<i64>,
+    Json(body): Json<LayoutUpdate>,
+) -> AppResult<Json<Value>> {
+    if !crate::db::save_layout(&state.pool, board_id, &body.layout).await? {
+        return Err(AppError::not_found("面板不存在"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+/* ------------------------------------------------------------------ */
 /* Import / export                                                     */
 /* ------------------------------------------------------------------ */
 
 async fn import_json(State(state): State<AppState>, body: String) -> AppResult<Json<Value>> {
-    let boards = import::parse_json(&body)
+    let import::ImportPayload {
+        boards,
+        appearance,
+    } = import::parse_json(&body)
         .map_err(|error| AppError::bad_request(format!("JSON 解析失败：{error}")))?;
     if boards.len() > 200 {
         return Err(AppError::bad_request("面板数量过多（最多 200 个）"));
@@ -835,7 +874,35 @@ async fn import_json(State(state): State<AppState>, body: String) -> AppResult<J
     if boards.iter().map(|board| board.columns.len()).sum::<usize>() > 2000 {
         return Err(AppError::bad_request("分组数量过多（最多 2000 个）"));
     }
-    let stats = crate::db::import_boards(&state.pool, boards).await?;
+    let (stats, imported) = crate::db::import_boards(&state.pool, boards).await?;
+
+    // Restore the masonry layout of every board that carried one, mapping the
+    // exported column names onto the ids assigned by this import.
+    for board in &imported {
+        let Some(layout) = board.layout.as_ref() else {
+            continue;
+        };
+        let resolved = import::resolve_layout(layout, &board.columns);
+        if resolved.iter().all(Vec::is_empty) {
+            continue;
+        }
+        if let Err(error) = crate::db::save_layout(&state.pool, board.id, &resolved).await {
+            tracing::warn!("layout restore failed: {}", error.message);
+        }
+    }
+
+    if let Some(appearance) = appearance {
+        let update = SettingsUpdate {
+            theme: appearance.theme,
+            palette: appearance.palette,
+            columns: appearance.columns,
+            active_board: None,
+        };
+        if let Err(error) = crate::db::save_settings(&state.pool, update).await {
+            tracing::warn!("appearance restore failed: {}", error.message);
+        }
+    }
+
     Ok(Json(json!({ "ok": true, "stats": stats })))
 }
 
@@ -847,33 +914,67 @@ async fn import_html(State(state): State<AppState>, body: String) -> AppResult<J
     if boards.len() > 500 {
         return Err(AppError::bad_request("面板数量过多（最多 500 个）"));
     }
-    let stats = crate::db::import_boards(&state.pool, boards).await?;
+    let (stats, _) = crate::db::import_boards(&state.pool, boards).await?;
     Ok(Json(json!({ "ok": true, "stats": stats })))
 }
 
 async fn export_json(State(state): State<AppState>) -> AppResult<Response> {
     let snapshot = load_state(&state.pool).await?;
+    let settings = crate::db::load_settings(&state.pool).await?;
     let exported_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
 
+    let boards: Vec<Value> = snapshot
+        .boards
+        .iter()
+        .map(|board| {
+            let names: HashMap<i64, &str> = board
+                .columns
+                .iter()
+                .map(|column| (column.id, column.name.as_str()))
+                .collect();
+            // Layout is exported by column *name* because ids are reassigned
+            // when the file is imported somewhere else.
+            let layout: Option<Vec<Vec<String>>> = settings.layouts.get(&board.id).map(|groups| {
+                groups
+                    .iter()
+                    .map(|group| {
+                        group
+                            .iter()
+                            .filter_map(|id| names.get(id).map(|name| name.to_string()))
+                            .collect()
+                    })
+                    .collect()
+            });
+            json!({
+                "name": board.name,
+                "layout": layout,
+                "columns": board.columns.iter().map(|column| json!({
+                    "name": column.name,
+                    "links": column.links.iter().map(|link| json!({
+                        "title": link.title,
+                        "url": link.url,
+                        "note": link.note,
+                        "icon": link.icon,
+                    })).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+
     let payload = json!({
         "app": "tabnest",
         "version": state.cfg.version,
         "exported_at": exported_at,
-        "boards": snapshot.boards.iter().map(|board| json!({
-            "name": board.name,
-            "columns": board.columns.iter().map(|column| json!({
-                "name": column.name,
-                "links": column.links.iter().map(|link| json!({
-                    "title": link.title,
-                    "url": link.url,
-                    "note": link.note,
-                    "icon": link.icon,
-                })).collect::<Vec<_>>(),
-            })).collect::<Vec<_>>(),
-        })).collect::<Vec<_>>(),
+        "appearance": {
+            "theme": settings.theme,
+            "palette": settings.palette,
+            "columns": settings.columns,
+            "active_board": settings.active_board,
+        },
+        "boards": boards,
     });
 
     Ok(attachment(

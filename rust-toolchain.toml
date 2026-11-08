@@ -1,0 +1,5 @@
+[toolchain]
+# Keeps CI and local builds on the same compiler and auto-installs the wasm
+# target that `worker-build` needs (rustup reads this file).
+channel = "stable"
+targets = ["wasm32-unknown-unknown"]

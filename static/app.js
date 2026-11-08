@@ -241,6 +241,7 @@
         showLogin();
         return;
       }
+      await syncSettingsFromServer();
       await loadState();
       $('#boot')?.remove();
     } catch (error) {
@@ -284,6 +285,7 @@
       await api('/api/login', { method: 'POST', body: { password } });
       els.loginLayer.hidden = true;
       els.loginPassword.value = '';
+      await syncSettingsFromServer();
       await loadState();
       $('#boot')?.remove();
     } catch (error) {
@@ -341,6 +343,7 @@
     if (persist) {
       localStorage.setItem('tabnest.theme', state.mode);
       localStorage.setItem('tabnest.palette', state.palette);
+      queueSettings({ theme: state.mode, palette: state.palette });
     }
 
     const meta = document.querySelector('meta[name="theme-color"]');
@@ -367,10 +370,99 @@
     const valid = COLUMN_OPTIONS.some((item) => item.id === value) ? value : 'auto';
     state.columns = valid;
     document.documentElement.dataset.columns = valid;
-    if (persist) localStorage.setItem('tabnest.columns', valid);
+    if (persist) {
+      localStorage.setItem('tabnest.columns', valid);
+      queueSettings({ columns: valid });
+    }
     updateAppearanceButton();
     syncAppearancePanel();
     if (state.boards.length && !state.query.trim()) renderMain();
+  }
+
+  /* Preferences live in localStorage for instant paint and on the server so
+     every device shares them. Writes are debounced (dragging fires a lot). */
+  let settingsTimer = null;
+  let pendingSettings = {};
+
+  function queueSettings(partial) {
+    Object.assign(pendingSettings, partial);
+    clearTimeout(settingsTimer);
+    settingsTimer = setTimeout(() => {
+      const body = pendingSettings;
+      pendingSettings = {};
+      api('/api/settings', { method: 'PUT', body }).catch(() => {
+        /* offline or logged out: localStorage still has the value */
+      });
+    }, 700);
+  }
+
+  const pendingLayouts = new Map();
+  let layoutTimer = null;
+
+  function queueLayout(boardId, visual) {
+    pendingLayouts.set(String(boardId), visual);
+    clearTimeout(layoutTimer);
+    layoutTimer = setTimeout(() => {
+      const entries = Array.from(pendingLayouts.entries());
+      pendingLayouts.clear();
+      for (const [id, layout] of entries) {
+        api(`/api/settings/layouts/${id}`, { method: 'PUT', body: { layout } }).catch(() => {});
+      }
+    }, 900);
+  }
+
+  /// Pull the shared preferences and seed localStorage so the existing render
+  /// paths (including the pre-paint theme script) keep working unchanged.
+  async function syncSettingsFromServer() {
+    try {
+      const settings = await api('/api/settings');
+      if (settings.theme || settings.palette) {
+        applyAppearance(settings.theme || state.mode, settings.palette || state.palette, true);
+      }
+      if (settings.columns) applyColumns(settings.columns, true);
+      const activeBoard = Number(settings.active_board);
+      if (Number.isFinite(activeBoard) && activeBoard > 0) {
+        localStorage.setItem('tabnest.board', String(activeBoard));
+      }
+      for (const [boardId, layout] of Object.entries(settings.layouts || {})) {
+        if (Array.isArray(layout)) {
+          localStorage.setItem(`tabnest.layout.${boardId}`, JSON.stringify(layout));
+        }
+      }
+
+      // One-time migration for devices that still hold the old local-only
+      // preferences: push whatever the server does not have yet.
+      const missing = {};
+      if (!settings.theme) {
+        const value = localStorage.getItem('tabnest.theme');
+        if (value) missing.theme = value;
+      }
+      if (!settings.palette) {
+        const value = localStorage.getItem('tabnest.palette');
+        if (value) missing.palette = value;
+      }
+      if (!settings.columns) {
+        const value = localStorage.getItem('tabnest.columns');
+        if (value) missing.columns = value;
+      }
+      if (Object.keys(missing).length) queueSettings(missing);
+
+      const knownLayouts = settings.layouts || {};
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (!key || !key.startsWith('tabnest.layout.')) continue;
+        const boardId = key.slice('tabnest.layout.'.length);
+        if (knownLayouts[boardId]) continue;
+        try {
+          const layout = JSON.parse(localStorage.getItem(key));
+          if (Array.isArray(layout)) queueLayout(boardId, layout);
+        } catch {
+          /* ignore corrupt entries */
+        }
+      }
+    } catch {
+      /* preferences are optional; local storage still works */
+    }
   }
 
   function openAppearance(anchor) {
@@ -521,7 +613,10 @@
   }
 
   function persistActive() {
-    if (state.activeId) localStorage.setItem('tabnest.board', String(state.activeId));
+    if (state.activeId) {
+      localStorage.setItem('tabnest.board', String(state.activeId));
+      queueSettings({ active_board: state.activeId });
+    }
   }
 
   function activeBoard() {
@@ -1364,9 +1459,9 @@
       <div class="modal-body">
         <section class="io-block">
           <h3>导出</h3>
-          <p>JSON 备份包含面板、分组、书签和外观设置（主题 / 配色 / 每行列数）；HTML 可直接导入 Chrome / Edge / Firefox。</p>
+          <p>JSON 备份包含面板、分组、书签，以及主题 / 配色 / 每行列数和每个面板的瀑布流排版；HTML 可直接导入 Chrome / Edge / Firefox。</p>
           <div class="io-actions">
-            <button type="button" class="btn ghost" data-act="export-json">${SVG.download} 导出 JSON</button>
+            <a class="btn ghost" href="/api/export/json" download>${SVG.download} 导出 JSON</a>
             <a class="btn ghost" href="/api/export/html" download>${SVG.download} 导出 HTML</a>
           </div>
         </section>
@@ -1411,50 +1506,6 @@
     });
   }
 
-  function currentAppearance() {
-    return { theme: state.mode, palette: state.palette, columns: state.columns };
-  }
-
-  /// Restore theme/palette/column count from a Tabnest JSON export.
-  function applyImportedAppearance(raw) {
-    if (!raw || typeof raw !== 'object') return false;
-    const mode = MODES.some((item) => item.id === raw.theme) ? raw.theme : state.mode;
-    const palette = PALETTES.some((item) => item.id === raw.palette) ? raw.palette : state.palette;
-    let applied = false;
-    if (mode !== state.mode || palette !== state.palette) {
-      applyAppearance(mode, palette, true);
-      applied = true;
-    }
-    if (COLUMN_OPTIONS.some((item) => item.id === raw.columns) && raw.columns !== state.columns) {
-      applyColumns(raw.columns, true);
-      applied = true;
-    }
-    return applied;
-  }
-
-  async function exportJson() {
-    try {
-      const response = await fetch('/api/export/json', { credentials: 'same-origin' });
-      if (!response.ok) throw new Error(`导出失败（HTTP ${response.status}）`);
-      const payload = await response.json();
-      // The server only knows about content; appearance lives in this browser,
-      // so it is attached here before the file is saved.
-      payload.appearance = currentAppearance();
-      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = 'tabnest-bookmarks.json';
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-      toast('已导出 JSON（包含外观设置）');
-    } catch (error) {
-      toast(error.message || '导出失败', 'error');
-    }
-  }
-
   async function importFile(file) {
     const errorEl = $('#import-error');
     const drop = $('#import-drop');
@@ -1467,19 +1518,12 @@
       const text = await file.text();
       const result = await api(endpoint, { method: 'POST', raw: text });
       const stats = result.stats || {};
-      let restored = false;
-      if (isJson) {
-        try {
-          restored = applyImportedAppearance(JSON.parse(text)?.appearance);
-        } catch {
-          /* a malformed appearance block should not fail the import */
-        }
-      }
       closeModal();
       await refresh();
+      // The server restored appearance and per-board layout from the file.
+      await syncSettingsFromServer();
       const skipped = stats.skipped ? `，跳过 ${stats.skipped} 个重复或无效网址` : '';
-      const appearance = restored ? '，已恢复外观设置' : '';
-      toast(`导入完成：${stats.boards} 个面板、${stats.columns} 个分组、${stats.links} 个书签${skipped}${appearance}`);
+      toast(`导入完成：${stats.boards} 个面板、${stats.columns} 个分组、${stats.links} 个书签${skipped}`);
     } catch (error) {
       if (errorEl) errorEl.textContent = error.message;
       else toast(error.message, 'error');
@@ -1831,6 +1875,7 @@
     list.splice(Math.max(0, Math.min(index, list.length)), 0, columnId);
 
     localStorage.setItem(layoutStorageKey(board.id), JSON.stringify(visual));
+    queueLayout(board.id, visual);
     const flat = visual.flat();
     const order = new Map(flat.map((id, position) => [id, position]));
     board.columns.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
@@ -1853,6 +1898,7 @@
     visual[target].unshift(columnId);
 
     localStorage.setItem(layoutStorageKey(board.id), JSON.stringify(visual));
+    queueLayout(board.id, visual);
     const flat = visual.flat();
     const order = new Map(flat.map((id, position) => [id, position]));
     board.columns.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
@@ -1921,9 +1967,6 @@
         break;
       case 'clear-search':
         clearSearch();
-        break;
-      case 'export-json':
-        await exportJson();
         break;
       default:
         break;

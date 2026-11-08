@@ -7,6 +7,12 @@ use sqlx::sqlite::{
 };
 use sqlx::SqlitePool;
 
+use tabnest_core::{
+    dto::{SettingsDto, SettingsUpdate},
+    import::ImportedBoard,
+    settings::{sanitize_layout, valid_columns, valid_palette, valid_theme},
+};
+
 use crate::{
     config::Config,
     error::{AppError, AppResult},
@@ -42,6 +48,16 @@ pub async fn connect(cfg: &Config) -> anyhow::Result<SqlitePool> {
             .execute(&pool)
             .await?;
         tracing::info!("数据库初始化完成：{}", cfg.db_path.display());
+    }
+    if version < 2 {
+        sqlx::raw_sql(include_str!("../migrations/002_settings.sql"))
+            .execute(&pool)
+            .await
+            .context("创建设置表失败")?;
+        sqlx::query("PRAGMA user_version = 2")
+            .execute(&pool)
+            .await?;
+        tracing::info!("已升级到数据库版本 2（服务器端外观设置）");
     }
 
     Ok(pool)
@@ -125,7 +141,10 @@ pub struct ImportStats {
     pub skipped: usize,
 }
 
-pub async fn import_boards(pool: &SqlitePool, boards: Vec<ImportBoard>) -> AppResult<ImportStats> {
+pub async fn import_boards(
+    pool: &SqlitePool,
+    boards: Vec<ImportBoard>,
+) -> AppResult<(ImportStats, Vec<ImportedBoard>)> {
     const MAX_LINKS: usize = 20_000;
     const MAX_BOARDS: usize = 500;
     const MAX_COLUMNS: usize = 2000;
@@ -135,6 +154,7 @@ pub async fn import_boards(pool: &SqlitePool, boards: Vec<ImportBoard>) -> AppRe
     }
 
     let mut stats = ImportStats::default();
+    let mut imported: Vec<ImportedBoard> = Vec::new();
     let mut tx = pool.begin().await?;
 
     for board in boards {
@@ -146,6 +166,7 @@ pub async fn import_boards(pool: &SqlitePool, boards: Vec<ImportBoard>) -> AppRe
             stats.skipped += board.columns.len();
             continue;
         }
+        let layout = board.layout;
         let board_name = fallback_name(&board.name, "导入的面板");
         let position: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(position), -1) + 1 FROM boards")
             .fetch_one(&mut *tx)
@@ -158,6 +179,7 @@ pub async fn import_boards(pool: &SqlitePool, boards: Vec<ImportBoard>) -> AppRe
             .last_insert_rowid();
         stats.boards += 1;
 
+        let mut inserted_columns: Vec<(String, i64)> = Vec::new();
         for column in board.columns {
             let column_name = fallback_name(&column.name, "导入的分组");
             let position: i64 =
@@ -174,6 +196,7 @@ pub async fn import_boards(pool: &SqlitePool, boards: Vec<ImportBoard>) -> AppRe
                     .await?
                     .last_insert_rowid();
             stats.columns += 1;
+            inserted_columns.push((column_name, column_id));
 
             for link in column.links {
                 if stats.links >= MAX_LINKS {
@@ -219,13 +242,108 @@ pub async fn import_boards(pool: &SqlitePool, boards: Vec<ImportBoard>) -> AppRe
                 stats.links += 1;
             }
         }
+
+        imported.push(ImportedBoard {
+            id: board_id,
+            columns: inserted_columns,
+            layout,
+        });
     }
 
     tx.commit().await?;
     if stats.boards == 0 {
         return Err(AppError::bad_request("没有找到可导入的书签"));
     }
-    Ok(stats)
+    Ok((stats, imported))
+}
+
+pub async fn load_settings(pool: &SqlitePool) -> AppResult<SettingsDto> {
+    let row: Option<(Option<String>, Option<String>, Option<String>, Option<i64>)> = sqlx::query_as(
+        "SELECT theme, palette, columns, active_board FROM settings WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    let mut settings = SettingsDto::default();
+    if let Some((theme, palette, columns, active_board)) = row {
+        settings.theme = theme;
+        settings.palette = palette;
+        settings.columns = columns;
+        settings.active_board = active_board;
+    }
+
+    let layouts: Vec<(i64, String)> =
+        sqlx::query_as("SELECT board_id, layout FROM board_layouts")
+            .fetch_all(pool)
+            .await?;
+    for (board_id, json) in layouts {
+        if let Ok(layout) = serde_json::from_str::<Vec<Vec<i64>>>(&json) {
+            settings.layouts.insert(board_id, sanitize_layout(layout));
+        }
+    }
+    Ok(settings)
+}
+
+/// Upsert the preference row. Invalid or unknown values are ignored rather than
+/// rejected so an old client cannot break syncing for everyone.
+pub async fn save_settings(pool: &SqlitePool, update: SettingsUpdate) -> AppResult<()> {
+    let theme = update.theme.filter(|value| valid_theme(value));
+    let palette = update.palette.filter(|value| valid_palette(value));
+    let columns = update.columns.filter(|value| valid_columns(value));
+
+    let active_board = match update.active_board {
+        Some(id) => {
+            let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM boards WHERE id = ?")
+                .bind(id)
+                .fetch_optional(pool)
+                .await?;
+            exists
+        }
+        None => None,
+    };
+
+    sqlx::query(
+        "INSERT INTO settings (id, theme, palette, columns, active_board)
+         VALUES (1, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+             theme = COALESCE(excluded.theme, settings.theme),
+             palette = COALESCE(excluded.palette, settings.palette),
+             columns = COALESCE(excluded.columns, settings.columns),
+             active_board = COALESCE(excluded.active_board, settings.active_board),
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+    )
+    .bind(theme)
+    .bind(palette)
+    .bind(columns)
+    .bind(active_board)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Returns `false` when the board no longer exists.
+pub async fn save_layout(
+    pool: &SqlitePool,
+    board_id: i64,
+    layout: &[Vec<i64>],
+) -> AppResult<bool> {
+    let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM boards WHERE id = ?")
+        .bind(board_id)
+        .fetch_optional(pool)
+        .await?;
+    if exists.is_none() {
+        return Ok(false);
+    }
+    let json = serde_json::to_string(&sanitize_layout(layout.to_vec()))?;
+    sqlx::query(
+        "INSERT INTO board_layouts (board_id, layout) VALUES (?, ?)
+         ON CONFLICT(board_id) DO UPDATE SET layout = excluded.layout",
+    )
+    .bind(board_id)
+    .bind(json)
+    .execute(pool)
+    .await?;
+    Ok(true)
 }
 
 fn fallback_name(name: &str, fallback: &str) -> String {

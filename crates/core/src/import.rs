@@ -11,6 +11,17 @@ use crate::html::{attr_value, decode_entities, truncate_chars};
 #[serde(default)]
 pub struct ImportPayload {
     pub boards: Vec<ImportBoard>,
+    /// Optional appearance + masonry layout written by a Tabnest export.
+    pub appearance: Option<ImportAppearance>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct ImportAppearance {
+    pub theme: Option<String>,
+    pub palette: Option<String>,
+    pub columns: Option<String>,
+    pub active_board: Option<i64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -18,6 +29,9 @@ pub struct ImportPayload {
 pub struct ImportBoard {
     pub name: String,
     pub columns: Vec<ImportColumn>,
+    /// Masonry layout as column **names**: `[["网盘", "邮箱"], ["云平台"]]`.
+    /// Names are used because ids are reassigned on import.
+    pub layout: Option<Vec<Vec<String>>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -36,9 +50,43 @@ pub struct ImportLink {
     pub icon: Option<String>,
 }
 
-pub fn parse_json(text: &str) -> anyhow::Result<Vec<ImportBoard>> {
-    let payload: ImportPayload = serde_json::from_str(text)?;
-    Ok(payload.boards)
+/// A board that was actually written, with the data needed to restore its
+/// layout after ids have been assigned.
+#[derive(Debug, Default)]
+pub struct ImportedBoard {
+    pub id: i64,
+    pub columns: Vec<(String, i64)>,
+    pub layout: Option<Vec<Vec<String>>>,
+}
+
+pub fn parse_json(text: &str) -> anyhow::Result<ImportPayload> {
+    Ok(serde_json::from_str(text)?)
+}
+
+/// Map `[[column name, ...], ...]` onto the freshly inserted column ids.
+///
+/// Duplicate names are matched in first-seen order so a board with two
+/// "全部" columns still restores its exact arrangement.
+pub fn resolve_layout(layout: &[Vec<String>], columns: &[(String, i64)]) -> Vec<Vec<i64>> {
+    let mut remaining: Vec<Option<i64>> = columns.iter().map(|(_, id)| Some(*id)).collect();
+
+    layout
+        .iter()
+        .map(|group| {
+            group
+                .iter()
+                .filter_map(|name| {
+                    let position = columns
+                        .iter()
+                        .enumerate()
+                        .position(|(index, (column_name, _))| {
+                            column_name == name && remaining[index].is_some()
+                        })?;
+                    remaining[position].take()
+                })
+                .collect()
+        })
+        .collect()
 }
 
 fn tag_re() -> &'static Regex {
@@ -134,6 +182,7 @@ pub fn parse_netscape(html: &str) -> Vec<ImportBoard> {
                 boards.push(ImportBoard {
                     name: board_name,
                     columns: Vec::new(),
+                    layout: None,
                 });
                 boards.len() - 1
             }
@@ -206,8 +255,33 @@ mod tests {
     #[test]
     fn parses_tabnest_json() {
         let payload = r#"{"boards":[{"name":"B","columns":[{"name":"C","links":[
-            {"title":"T","url":"https://example.com/","note":"n","icon":null}]}]}]}"#;
-        let boards = parse_json(payload).unwrap();
-        assert_eq!(boards[0].columns[0].links[0].title, "T");
+            {"title":"T","url":"https://example.com/","note":"n","icon":null}]}],
+            "layout":[["C"]]}],
+            "appearance":{"theme":"dark","palette":"ocean","columns":"4"}}"#;
+        let parsed = parse_json(payload).unwrap();
+        assert_eq!(parsed.boards[0].columns[0].links[0].title, "T");
+        assert_eq!(
+            parsed.boards[0].layout.as_deref(),
+            Some([vec!["C".to_string()]].as_slice())
+        );
+        let appearance = parsed.appearance.expect("appearance");
+        assert_eq!(appearance.theme.as_deref(), Some("dark"));
+    }
+
+    #[test]
+    fn resolves_layout_names_to_ids() {
+        let columns = vec![
+            ("网盘".to_string(), 10i64),
+            ("邮箱".to_string(), 11i64),
+            ("网盘".to_string(), 12i64),
+        ];
+        let layout = vec![
+            vec!["网盘".to_string(), "邮箱".to_string()],
+            vec!["网盘".to_string()],
+        ];
+        assert_eq!(
+            resolve_layout(&layout, &columns),
+            vec![vec![10, 11], vec![12]]
+        );
     }
 }

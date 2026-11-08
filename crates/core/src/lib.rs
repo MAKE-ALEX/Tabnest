@@ -11,6 +11,7 @@ pub mod import;
 pub mod net;
 pub mod security;
 pub mod session;
+pub mod settings;
 pub mod url;
 
 pub use html::PageMeta;

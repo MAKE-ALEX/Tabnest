@@ -7,8 +7,9 @@
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
-use tabnest_core::dto::{BoardDto, ColumnDto, LinkDto, StateDto};
-use tabnest_core::import::ImportBoard;
+use tabnest_core::dto::{BoardDto, ColumnDto, LinkDto, SettingsDto, SettingsUpdate, StateDto};
+use tabnest_core::import::{ImportBoard, ImportedBoard};
+use tabnest_core::settings::{sanitize_layout, valid_columns, valid_palette, valid_theme};
 use worker::d1::{D1Database, D1PreparedStatement, D1Type};
 
 use crate::error::{AppError, AppResult};
@@ -139,12 +140,33 @@ async fn seed_demo_data(db: &D1Database) -> AppResult<()> {
     )];
 
     for (board_position, (board_name, columns)) in demo.iter().enumerate() {
-        let board_id = insert_returning_id(
-            db,
-            "INSERT INTO boards (name, position) VALUES (?, ?) RETURNING id",
-            vec![text(board_name), int(board_position as i64)],
-        )
-        .await?;
+        // The first board is inserted conditionally so two isolates racing on a
+        // fresh database cannot create the demo twice.
+        let board_id = if board_position == 0 {
+            let created = execute(
+                db,
+                "INSERT INTO boards (name, position)
+                 SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM boards)",
+                vec![text(board_name), int(0)],
+            )
+            .await?;
+            if created == 0 {
+                return Ok(());
+            }
+            scalar_i64(
+                db,
+                "SELECT id AS value FROM boards ORDER BY id DESC LIMIT 1",
+                vec![],
+            )
+            .await?
+        } else {
+            insert_returning_id(
+                db,
+                "INSERT INTO boards (name, position) VALUES (?, ?) RETURNING id",
+                vec![text(board_name), int(board_position as i64)],
+            )
+            .await?
+        };
         for (column_position, (column_name, links)) in columns.iter().enumerate() {
             let column_id = insert_returning_id(
                 db,
@@ -517,7 +539,7 @@ pub struct ImportStats {
 pub async fn import_boards(
     db: &D1Database,
     boards: Vec<ImportBoard>,
-) -> AppResult<ImportStats> {
+) -> AppResult<(ImportStats, Vec<ImportedBoard>)> {
     if boards.len() > MAX_BOARDS {
         return Err(AppError::bad_request("面板数量过多"));
     }
@@ -530,6 +552,7 @@ pub async fn import_boards(
     let mut seen: HashSet<String> = existing.into_iter().map(|row| row.url).collect();
 
     let mut stats = ImportStats::default();
+    let mut imported: Vec<ImportedBoard> = Vec::new();
 
     for board in boards {
         if stats.links >= MAX_LINKS {
@@ -541,14 +564,17 @@ pub async fn import_boards(
             continue;
         }
 
+        let layout = board.layout;
         let board_name = fallback_name(&board.name, "导入的面板");
         let board_id = create_board_positioned(db, &board_name).await?;
         stats.boards += 1;
 
+        let mut inserted_columns: Vec<(String, i64)> = Vec::new();
         for column in board.columns {
             let column_name = fallback_name(&column.name, "导入的分组");
             let column_id = create_column_positioned(db, board_id, &column_name).await?;
             stats.columns += 1;
+            inserted_columns.push((column_name, column_id));
 
             let mut statements = Vec::new();
             let mut position = 0i64;
@@ -592,12 +618,109 @@ pub async fn import_boards(
                 db.batch(statements).await.map_err(dberr)?;
             }
         }
+
+        imported.push(ImportedBoard {
+            id: board_id,
+            columns: inserted_columns,
+            layout,
+        });
     }
 
     if stats.boards == 0 {
         return Err(AppError::bad_request("没有找到可导入的书签"));
     }
-    Ok(stats)
+    Ok((stats, imported))
+}
+
+/* ------------------------------------------------------------------ */
+/* Settings (shared across devices)                                    */
+/* ------------------------------------------------------------------ */
+
+pub async fn load_settings(db: &D1Database) -> AppResult<SettingsDto> {
+    #[derive(Deserialize)]
+    struct SettingsRow {
+        theme: Option<String>,
+        palette: Option<String>,
+        columns: Option<String>,
+        active_board: Option<i64>,
+    }
+    #[derive(Deserialize)]
+    struct LayoutRow {
+        board_id: i64,
+        layout: String,
+    }
+
+    let mut settings = SettingsDto::default();
+    if let Some(row) = query_one::<SettingsRow>(
+        db,
+        "SELECT theme, palette, columns, active_board FROM settings WHERE id = 1",
+        vec![],
+    )
+    .await?
+    {
+        settings.theme = row.theme;
+        settings.palette = row.palette;
+        settings.columns = row.columns;
+        settings.active_board = row.active_board;
+    }
+
+    let rows: Vec<LayoutRow> = query_all(db, "SELECT board_id, layout FROM board_layouts", vec![]).await?;
+    for row in rows {
+        if let Ok(layout) = serde_json::from_str::<Vec<Vec<i64>>>(&row.layout) {
+            settings.layouts.insert(row.board_id, sanitize_layout(layout));
+        }
+    }
+    Ok(settings)
+}
+
+pub async fn save_settings(db: &D1Database, update: SettingsUpdate) -> AppResult<()> {
+    let theme = update.theme.filter(|value| valid_theme(value));
+    let palette = update.palette.filter(|value| valid_palette(value));
+    let columns = update.columns.filter(|value| valid_columns(value));
+
+    let active_board = match update.active_board {
+        Some(id) if board_exists(db, id).await? => Some(id),
+        _ => None,
+    };
+
+    execute(
+        db,
+        "INSERT INTO settings (id, theme, palette, columns, active_board)
+         VALUES (1, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+             theme = COALESCE(excluded.theme, settings.theme),
+             palette = COALESCE(excluded.palette, settings.palette),
+             columns = COALESCE(excluded.columns, settings.columns),
+             active_board = COALESCE(excluded.active_board, settings.active_board),
+             updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+        vec![
+            theme.as_deref().map(text).unwrap_or(D1Type::Null),
+            palette.as_deref().map(text).unwrap_or(D1Type::Null),
+            columns.as_deref().map(text).unwrap_or(D1Type::Null),
+            active_board.map(int).unwrap_or(D1Type::Null),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn save_layout(
+    db: &D1Database,
+    board_id: i64,
+    layout: &[Vec<i64>],
+) -> AppResult<bool> {
+    if !board_exists(db, board_id).await? {
+        return Ok(false);
+    }
+    let json = serde_json::to_string(&sanitize_layout(layout.to_vec()))?;
+    execute(
+        db,
+        "INSERT INTO board_layouts (board_id, layout) VALUES (?, ?)
+         ON CONFLICT(board_id) DO UPDATE SET layout = excluded.layout",
+        vec![int(board_id), text(&json)],
+    )
+    .await?;
+    Ok(true)
 }
 
 async fn create_board_positioned(db: &D1Database, name: &str) -> AppResult<i64> {
