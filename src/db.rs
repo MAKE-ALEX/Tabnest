@@ -1,3 +1,5 @@
+//! SQLite 数据访问层：建库、示例数据、导入、偏好设置与排版读写。
+
 use std::time::Duration;
 
 use anyhow::Context;
@@ -20,6 +22,10 @@ use crate::{
     import::ImportBoard,
 };
 
+/// 打开（必要时创建）SQLite 数据库，并执行内置迁移。
+///
+/// 使用 WAL 日志模式兼顾并发读和写入性能；`busy_timeout` 让并发写入排队
+/// 而不是立刻报错。数据库版本记录在 `PRAGMA user_version` 中，逐级升级。
 pub async fn connect(cfg: &Config) -> anyhow::Result<SqlitePool> {
     let options = SqliteConnectOptions::new()
         .filename(&cfg.db_path)
@@ -36,6 +42,7 @@ pub async fn connect(cfg: &Config) -> anyhow::Result<SqlitePool> {
         .await
         .with_context(|| format!("无法打开数据库 {}", cfg.db_path.display()))?;
 
+    // 版本 0 -> 1：创建面板 / 分组 / 书签基础表。
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(&pool)
         .await?;
@@ -49,6 +56,7 @@ pub async fn connect(cfg: &Config) -> anyhow::Result<SqlitePool> {
             .await?;
         tracing::info!("数据库初始化完成：{}", cfg.db_path.display());
     }
+    // 版本 1 -> 2：新增服务端偏好设置与瀑布流排版表。
     if version < 2 {
         sqlx::raw_sql(include_str!("../migrations/002_settings.sql"))
             .execute(&pool)
@@ -63,6 +71,7 @@ pub async fn connect(cfg: &Config) -> anyhow::Result<SqlitePool> {
     Ok(pool)
 }
 
+/// 数据库为空时写入一组示例面板，方便第一次启动就能看到界面。
 pub async fn seed_if_empty(pool: &SqlitePool, enabled: bool) -> anyhow::Result<()> {
     if !enabled {
         return Ok(());
@@ -74,6 +83,7 @@ pub async fn seed_if_empty(pool: &SqlitePool, enabled: bool) -> anyhow::Result<(
         return Ok(());
     }
 
+    // (面板名, [(分组名, [(标题, 网址, 备注), ...]), ...])
     let demo: Vec<(&str, Vec<(&str, Vec<(&str, &str, &str)>)>)> = vec![(
         "我的主页",
         vec![
@@ -133,18 +143,24 @@ pub async fn seed_if_empty(pool: &SqlitePool, enabled: bool) -> anyhow::Result<(
     Ok(())
 }
 
+/// 一次导入的结果统计。
 #[derive(Debug, Default, Serialize)]
 pub struct ImportStats {
     pub boards: usize,
     pub columns: usize,
     pub links: usize,
+    /// 因重复、非法或超出上限而被跳过的书签数。
     pub skipped: usize,
 }
 
+/// 把解析好的书签批量写入数据库，返回统计信息和已写入面板的 id 映射。
+///
+/// 整个导入在一个事务里完成：要么全部成功，要么全部回滚，不会留下半个面板。
 pub async fn import_boards(
     pool: &SqlitePool,
     boards: Vec<ImportBoard>,
 ) -> AppResult<(ImportStats, Vec<ImportedBoard>)> {
+    // 防止畸形文件把数据库撑爆。
     const MAX_LINKS: usize = 20_000;
     const MAX_BOARDS: usize = 500;
     const MAX_COLUMNS: usize = 2000;
@@ -168,6 +184,7 @@ pub async fn import_boards(
         }
         let layout = board.layout;
         let board_name = fallback_name(&board.name, "导入的面板");
+        // 追加到现有面板末尾。
         let position: i64 = sqlx::query_scalar("SELECT COALESCE(MAX(position), -1) + 1 FROM boards")
             .fetch_one(&mut *tx)
             .await?;
@@ -203,10 +220,12 @@ pub async fn import_boards(
                     stats.skipped += 1;
                     continue;
                 }
+                // 网址不合法就跳过，不因为一条坏数据让整个导入失败。
                 let Ok(url) = normalize_url(&link.url) else {
                     stats.skipped += 1;
                     continue;
                 };
+                // 按 URL 去重：已存在的书签不重复导入。
                 let exists: Option<i64> =
                     sqlx::query_scalar("SELECT id FROM links WHERE url = ? LIMIT 1")
                         .bind(&url)
@@ -216,6 +235,7 @@ pub async fn import_boards(
                     stats.skipped += 1;
                     continue;
                 }
+                // 没标题时用域名兜底，保证卡片有可读文字。
                 let title = if link.title.trim().is_empty() {
                     host_label(&url)
                 } else {
@@ -258,6 +278,7 @@ pub async fn import_boards(
     Ok((stats, imported))
 }
 
+/// 读取全局偏好设置，以及各面板的瀑布流排版。
 pub async fn load_settings(pool: &SqlitePool) -> AppResult<SettingsDto> {
     let row: Option<(Option<String>, Option<String>, Option<String>, Option<i64>)> = sqlx::query_as(
         "SELECT theme, palette, columns, active_board FROM settings WHERE id = 1",
@@ -273,6 +294,7 @@ pub async fn load_settings(pool: &SqlitePool) -> AppResult<SettingsDto> {
         settings.active_board = active_board;
     }
 
+    // 排版以 JSON 字符串存储，读出来后再解析和清洗。
     let layouts: Vec<(i64, String)> =
         sqlx::query_as("SELECT board_id, layout FROM board_layouts")
             .fetch_all(pool)
@@ -285,8 +307,10 @@ pub async fn load_settings(pool: &SqlitePool) -> AppResult<SettingsDto> {
     Ok(settings)
 }
 
-/// Upsert the preference row. Invalid or unknown values are ignored rather than
-/// rejected so an old client cannot break syncing for everyone.
+/// 写入偏好设置（upsert）。
+///
+/// 非法或未知的取值会被忽略而不是报错，这样旧版本客户端不会把所有人的同步
+/// 都弄坏。`active_board` 还会额外校验面板是否真实存在。
 pub async fn save_settings(pool: &SqlitePool, update: SettingsUpdate) -> AppResult<()> {
     let theme = update.theme.filter(|value| valid_theme(value));
     let palette = update.palette.filter(|value| valid_palette(value));
@@ -303,6 +327,7 @@ pub async fn save_settings(pool: &SqlitePool, update: SettingsUpdate) -> AppResu
         None => None,
     };
 
+    // COALESCE 保证只更新本次传入的字段，`None` 不会覆盖已有值。
     sqlx::query(
         "INSERT INTO settings (id, theme, palette, columns, active_board)
          VALUES (1, ?, ?, ?, ?)
@@ -322,7 +347,7 @@ pub async fn save_settings(pool: &SqlitePool, update: SettingsUpdate) -> AppResu
     Ok(())
 }
 
-/// Returns `false` when the board no longer exists.
+/// 保存某个面板的瀑布流排版；面板不存在时返回 `false`。
 pub async fn save_layout(
     pool: &SqlitePool,
     board_id: i64,
@@ -347,6 +372,7 @@ pub async fn save_layout(
     Ok(true)
 }
 
+/// 名称兜底：空名称使用默认值，过长则截断到 60 字符。
 fn fallback_name(name: &str, fallback: &str) -> String {
     let trimmed = name.trim();
     if trimmed.is_empty() {

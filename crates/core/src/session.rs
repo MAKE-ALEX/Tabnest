@@ -1,18 +1,21 @@
-//! Signed, stateless session cookies.
+//! 带签名的无状态会话 Cookie。
 //!
-//! The native server keeps sessions in memory; the Workers build has no
-//! durable process, so it carries the expiry **inside** an HMAC-signed cookie
-//! instead. Forging a token requires the server-side secret.
+//! 原生服务端把会话放在内存里；Workers 构建没有常驻进程，无法在内存中保存会话，
+//! 所以把过期时间放进 **HMAC 签名过的 Cookie** 里随请求携带。
+//! 想伪造令牌就必须拿到服务端的签名密钥。
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 pub const COOKIE_NAME: &str = "tabnest_session";
 pub const HOST_COOKIE_NAME: &str = "__Host-tabnest_session";
+/// 会话有效期：7 天。
 pub const SESSION_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 
-/// Browser caches the `__Host-` name only over HTTPS. The worker always runs
-/// behind TLS, so it uses the stricter prefix.
+/// 选择 Cookie 名称。
+///
+/// `__Host-` 前缀只在 HTTPS 下才有效，浏览器也要求它必须带 `Secure`、
+/// 且不能指定 `Domain`。Worker 始终运行在 TLS 之后，因此使用更严格的名称。
 pub fn cookie_name(secure: bool) -> &'static str {
     if secure {
         HOST_COOKIE_NAME
@@ -21,6 +24,7 @@ pub fn cookie_name(secure: bool) -> &'static str {
     }
 }
 
+/// 生成写入会话 Cookie 的 `Set-Cookie` 值。
 pub fn session_cookie(token: &str, secure: bool) -> String {
     let secure_flag = if secure { "; Secure" } else { "" };
     format!(
@@ -29,6 +33,7 @@ pub fn session_cookie(token: &str, secure: bool) -> String {
     )
 }
 
+/// 生成清除会话 Cookie 的 `Set-Cookie` 值（`Max-Age=0` 让浏览器立即删除）。
 pub fn clear_cookie(secure: bool) -> String {
     let secure_flag = if secure { "; Secure" } else { "" };
     format!(
@@ -37,13 +42,14 @@ pub fn clear_cookie(secure: bool) -> String {
     )
 }
 
+/// 用服务端密钥对 payload 做 HMAC-SHA256，返回原始签名字节。
 fn sign(secret: &[u8], payload: &str) -> Vec<u8> {
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("hmac accepts any key length");
     mac.update(payload.as_bytes());
     mac.finalize().into_bytes().to_vec()
 }
 
-/// Build `v1.<expires_at_secs>.<nonce>.<hmac-hex>`.
+/// 生成令牌，格式为 `v1.<过期时间秒>.<随机串>.<签名十六进制>`。
 pub fn issue_token(secret: &[u8], now_ms: i64, nonce: &str) -> String {
     let exp = now_ms / 1000 + SESSION_TTL_SECS as i64;
     let payload = format!("v1.{exp}.{nonce}");
@@ -51,6 +57,9 @@ pub fn issue_token(secret: &[u8], now_ms: i64, nonce: &str) -> String {
     format!("{payload}.{signature}")
 }
 
+/// 校验令牌：格式正确、未过期，且签名与重新计算的结果一致。
+///
+/// 签名比较使用常量时间的 `verify_slice`，避免时序侧信道。
 pub fn verify_token(secret: &[u8], token: &str, now_ms: i64) -> bool {
     let mut parts = token.splitn(4, '.');
     let (Some("v1"), Some(exp), Some(nonce), Some(signature)) =
@@ -61,6 +70,7 @@ pub fn verify_token(secret: &[u8], token: &str, now_ms: i64) -> bool {
     let Ok(exp) = exp.parse::<i64>() else {
         return false;
     };
+    // 已过期（或恰好到期）的令牌直接拒绝。
     if exp <= now_ms / 1000 {
         return false;
     }
@@ -73,7 +83,9 @@ pub fn verify_token(secret: &[u8], token: &str, now_ms: i64) -> bool {
     mac.verify_slice(&signature).is_ok()
 }
 
-/// Read one cookie value out of a raw `Cookie` header.
+/// 从原始 `Cookie` 请求头中取出指定名称的值。
+///
+/// 只做简单切分，调用方需要保证 `name` 是可信常量。
 pub fn extract_cookie<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
     for part in cookie_header.split(';') {
         let mut kv = part.trim().splitn(2, '=');

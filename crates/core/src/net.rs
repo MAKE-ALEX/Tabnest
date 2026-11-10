@@ -1,9 +1,12 @@
-//! Address classification used by the SSRF guard around outbound fetches.
+//! 出站请求的 SSRF 防护所使用的地址分类逻辑。
 
 use std::net::{IpAddr, Ipv4Addr};
 
-/// Reject loopback, private, link-local, CGNAT, multicast, documentation and
-/// otherwise non-public addresses. IPv4-mapped IPv6 addresses are unwrapped.
+/// 判断一个 IP 是否禁止作为出站抓取目标。
+///
+/// 拒绝回环、私有、链路本地、CGNAT、组播、文档示例等非公网地址；
+/// IPv4 映射的 IPv6 地址（`::ffff:a.b.c.d`）会先拆出 IPv4 再判断，
+/// 防止通过这种写法绕过 IPv4 规则。
 pub fn is_forbidden_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_forbidden_v4(v4),
@@ -15,15 +18,21 @@ pub fn is_forbidden_ip(ip: IpAddr) -> bool {
             v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
-                || (segments[0] & 0xfe00) == 0xfc00 // fc00::/7 unique local
-                || (segments[0] & 0xffc0) == 0xfe80 // fe80::/10 link local
-                || (segments[0] == 0x2001 && segments[1] == 0x0db8) // documentation
-                || segments[0] == 0x2002 // 6to4
-                || (segments[0] == 0x2001 && segments[1] == 0x0000) // Teredo
+                // fc00::/7：IPv6 唯一本地地址（类似内网）。
+                || (segments[0] & 0xfe00) == 0xfc00
+                // fe80::/10：链路本地地址。
+                || (segments[0] & 0xffc0) == 0xfe80
+                // 2001:db8::/32：文档示例地址。
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+                // 2002::/16：6to4 隧道地址。
+                || segments[0] == 0x2002
+                // 2001::/32：Teredo 隧道地址。
+                || (segments[0] == 0x2001 && segments[1] == 0x0000)
         }
     }
 }
 
+/// IPv4 版本的禁用网段判断。
 fn is_forbidden_v4(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
     ip.is_private()
@@ -33,11 +42,17 @@ fn is_forbidden_v4(ip: Ipv4Addr) -> bool {
         || ip.is_documentation()
         || ip.is_unspecified()
         || ip.is_multicast()
+        // 0.0.0.0/8：本网络。
         || octets[0] == 0
+        // 100.64.0.0/10：运营商级 NAT（CGNAT）。
         || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        // 192.0.0.0/24：IETF 协议分配。
         || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        // 192.88.99.0/24：6to4 中继。
         || (octets[0] == 192 && octets[1] == 88 && octets[2] == 99)
+        // 198.18.0.0/15：基准测试网段。
         || (octets[0] == 198 && (octets[1] == 18 || octets[1] == 19))
+        // 240.0.0.0/4：保留地址（含 255.255.255.255 已单独判断）。
         || octets[0] >= 240
 }
 

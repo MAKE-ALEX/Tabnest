@@ -8,11 +8,14 @@
   <title>Tabnest · 个人书签面板</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="manifest" href="/manifest.webmanifest">
+  <!-- 同步脚本：在首帧前写入 data-theme / data-palette，避免主题闪烁。
+       文件名里的 -20261031i 是缓存指纹，由后端静态资源层注入。 -->
   <script src="/theme-init-20261031i.js"></script>
   <link rel="stylesheet" href="/style-20261031i.css">
 </head>
 <body>
   <div class="app" id="app">
+    <!-- 左侧导航：品牌区、新建面板按钮、运行期渲染的面板列表 -->
     <aside class="sidebar" id="sidebar" aria-label="面板导航">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true">
@@ -41,8 +44,10 @@
       <nav class="board-list" id="board-list" aria-label="面板列表"></nav>
     </aside>
 
+    <!-- 移动端打开侧栏时的遮罩 -->
     <div class="scrim" id="scrim"></div>
 
+    <!-- 主区域：顶栏 + 标题 + 面板内容；#main-head 与 #board-view 由 app.js 渲染 -->
     <main class="main">
       <div class="topbar">
         <label class="search topbar-search">
@@ -68,9 +73,12 @@
     </main>
   </div>
 
+  <!-- 全局提示条容器（aria-live 让读屏软件播报新提示） -->
   <div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+  <!-- 弹窗挂载点：内容由 app.js 的 promptDialog / confirmDialog 等写入 -->
   <div class="modal-layer" id="modal-layer" hidden></div>
 
+  <!-- 登录遮罩：服务端开启密码保护且尚未登录时显示 -->
   <div class="login-layer" id="login-layer" hidden>
     <form class="login-card" id="login-form">
       <span class="login-mark" aria-hidden="true">
@@ -92,6 +100,7 @@
     </form>
   </div>
 
+  <!-- 首屏占位：数据加载完成后由 app.js 移除 -->
   <div class="boot" id="boot">
     <span class="boot-mark" aria-hidden="true">
       <svg viewBox="0 0 64 64">
@@ -107,6 +116,7 @@
     <p class="noscript">Tabnest 需要启用 JavaScript 才能使用。</p>
   </noscript>
 
+  <!-- 主脚本：defer 保证 DOM 就绪后执行；文件名同样带缓存指纹 -->
   <script src="/app-20261031i.js" defer></script>
 </body>
 </html>

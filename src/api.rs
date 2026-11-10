@@ -1,3 +1,9 @@
+//! HTTP API：面板 / 分组 / 书签的增删改查，以及网页元信息抓取、图标缓存、
+//! 偏好设置和导入导出。
+//!
+//! 会修改数据的路由都挂在登录中间件之后；`/api/session`、`/api/login`、
+//! `/api/logout` 保持公开。
+
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -29,6 +35,10 @@ use crate::{
     state::AppState,
 };
 
+/// 构造 API 路由。
+///
+/// 先注册需要登录的「受保护」路由，再挂上鉴权中间件；公开的登录相关路由
+/// 单独合并进来。整个 Router 限制请求体 25 MB，并统一做 CSRF 校验。
 pub fn router(state: AppState) -> Router {
     let protected = Router::new()
         .route("/api/state", get(state_handler))
@@ -61,6 +71,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/import/html", post(import_html))
         .route("/api/export/json", get(export_json))
         .route("/api/export/html", get(export_html))
+        // 这一层只作用于上面的路由：未登录直接 401。
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,
@@ -77,12 +88,16 @@ pub fn router(state: AppState) -> Router {
 }
 
 /* ------------------------------------------------------------------ */
-/* DTOs                                                                */
+/* DTO（数据传输对象）                                                 */
 /* ------------------------------------------------------------------ */
 
 pub use tabnest_core::dto::{BoardDto, ColumnDto, LinkDto, SettingsDto, StateDto};
 use tabnest_core::dto::{LayoutUpdate, SettingsUpdate};
 
+/// 一次性查询出面板、分组、书签，并在内存里组装成嵌套结构。
+///
+/// 三次查询各自按 `position` 排序，避免对每一层都做 N+1 查询；
+/// 用两个索引表把子项挂到正确的父节点上。
 pub async fn load_state(pool: &SqlitePool) -> AppResult<StateDto> {
     let boards: Vec<(i64, String, i64)> =
         sqlx::query_as("SELECT id, name, position FROM boards ORDER BY position ASC, id ASC")
@@ -117,6 +132,7 @@ pub async fn load_state(pool: &SqlitePool) -> AppResult<StateDto> {
         });
     }
     for (id, board_id, name, position) in columns {
+        // 父面板不存在时静默丢弃（外键理论上不会出现这种情况）。
         if let Some(&index) = board_index.get(&board_id) {
             let column_position = result.boards[index].columns.len();
             result.boards[index].columns.push(ColumnDto {
@@ -147,9 +163,10 @@ pub async fn load_state(pool: &SqlitePool) -> AppResult<StateDto> {
 }
 
 /* ------------------------------------------------------------------ */
-/* Session                                                             */
+/* 会话                                                                */
 /* ------------------------------------------------------------------ */
 
+/// 告诉前端：是否需要登录、当前是否已登录。
 async fn session_info(State(state): State<AppState>, headers: HeaderMap) -> Json<Value> {
     Json(json!({
         "auth_required": state.cfg.password.is_some(),
@@ -162,12 +179,14 @@ struct LoginRequest {
     password: String,
 }
 
+/// 登录：限流检查、常量时间比较密码、成功后下发会话 Cookie。
 async fn login(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<LoginRequest>,
 ) -> AppResult<Response> {
+    // 没有配置密码时，登录接口直接返回成功（免密模式）。
     let Some(expected) = state.cfg.password.as_deref() else {
         return Ok(Json(json!({ "ok": true })).into_response());
     };
@@ -178,9 +197,11 @@ async fn login(
         &state.cfg.trusted_proxies,
         state.cfg.trust_proxy,
     );
+    // 超长密码直接拒绝，避免把巨大输入喂给哈希。
     if body.password.len() > 256 {
         return Err(AppError::unauthorized("密码不正确"));
     }
+    // 先查该 IP 是否处于锁定期；锁定中直接返回 429。
     let lockout = {
         let Ok(mut limiter) = state.login_limiter.lock() else {
             return Err(AppError::internal("登录限速器不可用"));
@@ -195,6 +216,8 @@ async fn login(
     }
 
     if !constant_time_eq(body.password.trim(), expected) {
+        // 失败后记录一次，触发锁定时返回 429；否则延迟 300ms 再回 401，
+        // 抬高暴力破解的成本。
         let locked_for = state
             .login_limiter
             .lock()
@@ -207,6 +230,7 @@ async fn login(
         return Err(AppError::unauthorized("密码不正确"));
     }
 
+    // 登录成功，清空该 IP 的失败计数。
     if let Ok(mut limiter) = state.login_limiter.lock() {
         limiter.record_success(ip);
     }
@@ -220,6 +244,7 @@ async fn login(
     Ok(response)
 }
 
+/// 构造 429 响应，并带上标准的 `Retry-After` 头。
 fn too_many_response(retry_after: Duration) -> Response {
     let seconds = retry_after.as_secs().max(1);
     let mut response = (
@@ -233,6 +258,7 @@ fn too_many_response(retry_after: Duration) -> Response {
     response
 }
 
+/// 注销：删除服务端会话，并让浏览器清掉 Cookie。
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(token) = auth::extract_cookie(
         &headers,
@@ -249,7 +275,7 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
 }
 
 /* ------------------------------------------------------------------ */
-/* Boards                                                              */
+/* 面板                                                                */
 /* ------------------------------------------------------------------ */
 
 async fn state_handler(State(state): State<AppState>) -> AppResult<Json<StateDto>> {
@@ -261,6 +287,7 @@ struct CreateBoard {
     name: String,
 }
 
+/// 新建面板，追加到列表末尾。
 async fn create_board(
     State(state): State<AppState>,
     Json(body): Json<CreateBoard>,
@@ -282,6 +309,7 @@ struct UpdateBoard {
     name: String,
 }
 
+/// 重命名面板。
 async fn update_board(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -297,6 +325,7 @@ async fn update_board(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// 删除面板；外键级联会一并删掉分组和书签。
 async fn delete_board(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -314,6 +343,7 @@ struct OrderBoards {
     ids: Vec<i64>,
 }
 
+/// 按传入顺序重排面板（`ids` 的下标即新位置）。
 async fn order_boards(
     State(state): State<AppState>,
     Json(body): Json<OrderBoards>,
@@ -334,7 +364,7 @@ async fn order_boards(
 }
 
 /* ------------------------------------------------------------------ */
-/* Columns                                                             */
+/* 分组                                                                */
 /* ------------------------------------------------------------------ */
 
 #[derive(Deserialize)]
@@ -344,6 +374,7 @@ struct CreateColumn {
     name: String,
 }
 
+/// 在指定面板下新建分组；名称为空时使用默认名。
 async fn create_column(
     State(state): State<AppState>,
     Json(body): Json<CreateColumn>,
@@ -374,6 +405,7 @@ struct UpdateColumn {
     name: String,
 }
 
+/// 重命名分组。
 async fn update_column(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -389,6 +421,7 @@ async fn update_column(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// 删除分组及其下的书签。
 async fn delete_column(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -407,6 +440,7 @@ struct OrderColumns {
     ids: Vec<i64>,
 }
 
+/// 重排分组；同时把每组挂到 `board_id` 下（支持跨面板拖动）。
 async fn order_columns(
     State(state): State<AppState>,
     Json(body): Json<OrderColumns>,
@@ -429,7 +463,7 @@ async fn order_columns(
 }
 
 /* ------------------------------------------------------------------ */
-/* Links                                                               */
+/* 书签                                                                */
 /* ------------------------------------------------------------------ */
 
 #[derive(Deserialize)]
@@ -444,6 +478,10 @@ struct CreateLink {
     icon: Option<String>,
 }
 
+/// 新建书签。
+///
+/// 标题或图标缺失时，尝试抓取网页元信息补齐；抓取失败（超时、内网、
+/// 目标不可达）不影响保存，用域名兜底标题。
 async fn create_link(
     State(state): State<AppState>,
     Json(body): Json<CreateLink>,
@@ -455,6 +493,7 @@ async fn create_link(
     let mut icon = clean_icon(body.icon);
 
     if title.is_empty() || icon.is_none() {
+        // 最多等 6 秒，失败一律当作「没有元信息」。
         let meta = tokio::time::timeout(
             Duration::from_secs(6),
             fetch_meta(&url, state.cfg.allow_private_network),
@@ -516,6 +555,10 @@ struct UpdateLink {
     column_id: Option<i64>,
 }
 
+/// 更新书签，支持部分字段更新（只改传入的字段）。
+///
+/// 换到别的分组时追加到目标分组末尾；改网址且没给新图标时清掉旧图标，
+/// 避免显示上一个网站的 favicon。
 async fn update_link(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -530,6 +573,7 @@ async fn update_link(
         return Err(AppError::not_found("书签不存在"));
     };
 
+    // 网址字段：传了非空值就规范化，否则沿用旧值。
     let new_url = match body.url.as_deref() {
         Some(raw) if !raw.trim().is_empty() => {
             normalize_url(raw).map_err(AppError::bad_request)?
@@ -555,12 +599,14 @@ async fn update_link(
         Some(note) => truncate_chars(note.trim(), 2000),
         None => current_note,
     };
+    // 图标：显式传了就更新；改网址则清空；否则保留原值。
     let icon = match clean_icon(body.icon) {
         Some(icon) => Some(icon),
         None if url_changed => None,
         None => old_icon,
     };
 
+    // 只有跨分组移动时才需要重算 position。
     let mut column_id = old_column;
     let mut position: Option<i64> = None;
     if let Some(target) = body.column_id {
@@ -608,6 +654,7 @@ async fn update_link(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// 删除书签。
 async fn delete_link(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -631,6 +678,7 @@ struct ArrangeColumn {
     link_ids: Vec<i64>,
 }
 
+/// 批量调整书签所属分组和顺序（拖拽结束后调用）。
 async fn arrange_links(
     State(state): State<AppState>,
     Json(body): Json<ArrangeLinks>,
@@ -649,6 +697,7 @@ async fn arrange_links(
                 .bind(link_id)
                 .execute(&mut *tx)
                 .await?;
+            // 传了不存在的书签 id 时整个事务回滚。
             ensure_affected(result.rows_affected())?;
         }
     }
@@ -657,7 +706,7 @@ async fn arrange_links(
 }
 
 /* ------------------------------------------------------------------ */
-/* Metadata & favicons                                                 */
+/* 元信息与图标                                                        */
 /* ------------------------------------------------------------------ */
 
 #[derive(Deserialize)]
@@ -665,6 +714,7 @@ struct MetaQuery {
     url: String,
 }
 
+/// 抓取网页标题和图标。
 async fn meta_handler(
     State(state): State<AppState>,
     Query(query): Query<MetaQuery>,
@@ -677,6 +727,7 @@ async fn meta_handler(
     .await
     .map_err(|_| AppError::bad_request("抓取网页信息超时"))?
     .map_err(|error| {
+        // 对内网地址的拒绝也走这里，日志里保留真实原因。
         tracing::warn!(%error, %url, "metadata fetch rejected or failed");
         AppError::bad_request("无法抓取该网址的信息（内网地址或访问失败）")
     })?;
@@ -693,11 +744,13 @@ struct IconQuery {
     u: String,
 }
 
+/// 返回书签图标：优先读磁盘缓存，未命中再抓取并回写。
 async fn favicon_handler(
     State(state): State<AppState>,
     Query(query): Query<IconQuery>,
 ) -> AppResult<Response> {
     let url = normalize_url(&query.u).map_err(AppError::bad_request)?;
+    // 用 URL 的 SHA-1 作为缓存文件名，避免用户输入影响路径。
     let digest = hex::encode(Sha1::digest(url.as_bytes()));
     let cache_dir = state.cfg.data_dir.join("favicons");
     let path = cache_dir.join(digest);
@@ -706,8 +759,7 @@ async fn favicon_handler(
         if let Some(content_type) = sniff_image(&bytes, "") {
             return Ok(image_response(bytes, content_type));
         }
-        // Drop anything that is no longer an accepted raster image (for
-        // example old SVG entries cached before the whitelist changed).
+        // 缓存里不再是允许的位图（例如白名单调整前缓存了 SVG），直接删掉重抓。
         let _ = tokio::fs::remove_file(&path).await;
     }
 
@@ -717,6 +769,7 @@ async fn favicon_handler(
             tracing::debug!(%url, "favicon resolve failed: {}", error.message);
             error
         })?;
+    // 缓存写失败不影响本次响应。
     if let Err(error) = tokio::fs::write(&path, &bytes).await {
         tracing::warn!(%error, "favicon cache write failed");
     } else {
@@ -725,20 +778,22 @@ async fn favicon_handler(
     Ok(image_response(bytes, kind))
 }
 
-/// Turn whatever the caller passed into a raster icon.
+/// 把调用方传入的东西解析成一张可用的位图图标。
 ///
-/// Imported bookmarks have no icon URL, so the front-end sends the page URL
-/// instead. In that case the HTML is parsed for `<link rel="icon">` (which is
-/// often an SVG we refuse to serve) and `/favicon.ico` is the last resort.
+/// 导入的书签没有图标地址，前端会改传页面 URL。这种情况下先解析 HTML 里的
+/// `<link rel="icon">`（常常是 SVG，而 SVG 不在允许的格式内），最后再退回
+/// 站点根目录的 `/favicon.ico`。
 async fn resolve_icon(url: &str, allow_private: bool) -> AppResult<(Vec<u8>, &'static str)> {
     let (bytes, content_type, final_url) = fetch_limited(url, 1_500_000, allow_private)
         .await
         .map_err(|_| AppError::not_found("图标不可用"))?;
 
+    // 直接就是图片。
     if let Some(kind) = sniff_image(&bytes, &content_type) {
         return Ok((bytes, kind));
     }
 
+    // 是 HTML：从中提取图标地址再抓一次。
     if content_type.is_empty()
         || content_type.contains("html")
         || content_type.contains("text")
@@ -752,6 +807,7 @@ async fn resolve_icon(url: &str, allow_private: bool) -> AppResult<(Vec<u8>, &'s
         }
     }
 
+    // 最后的兜底：同源 /favicon.ico。
     if let Some(candidate) = origin_favicon(&final_url) {
         if candidate != url {
             if let Ok((bytes, kind)) = fetch_raster(&candidate, allow_private).await {
@@ -763,6 +819,7 @@ async fn resolve_icon(url: &str, allow_private: bool) -> AppResult<(Vec<u8>, &'s
     Err(AppError::not_found("图标不可用"))
 }
 
+/// 抓取一个候选图标地址，只接受经过校验的位图格式。
 async fn fetch_raster(url: &str, allow_private: bool) -> AppResult<(Vec<u8>, &'static str)> {
     let (bytes, content_type, _) = fetch_limited(url, 512 * 1024, allow_private)
         .await
@@ -773,18 +830,22 @@ async fn fetch_raster(url: &str, allow_private: bool) -> AppResult<(Vec<u8>, &'s
     }
 }
 
+/// 根据页面 URL 推导站点根目录的 `/favicon.ico`。
 fn origin_favicon(page_url: &str) -> Option<String> {
     let parsed = url::Url::parse(page_url).ok()?;
     let origin = parsed.origin().ascii_serialization();
+    // `about:blank`、`data:` 等非层级 URL 的 origin 是字符串 "null"。
     if origin == "null" {
         return None;
     }
     Some(format!("{origin}/favicon.ico"))
 }
 
+/// 图标缓存最多保留的文件数。
 const FAVICON_CACHE_MAX_FILES: usize = 1000;
 
-/// Keep the on-disk favicon cache bounded. Called only on a cache miss.
+/// 控制磁盘上的图标缓存规模：超出上限时按修改时间删掉最旧的。
+/// 只在缓存未命中、正准备写入时调用，避免每次请求都扫目录。
 async fn prune_favicon_cache(dir: &std::path::Path) {
     let Ok(mut entries) = tokio::fs::read_dir(dir).await else {
         return;
@@ -808,6 +869,7 @@ async fn prune_favicon_cache(dir: &std::path::Path) {
     }
 }
 
+/// 构造图标响应：允许浏览器私有缓存一周，并禁止内容被当作文档执行。
 fn image_response(bytes: Vec<u8>, content_type: &'static str) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
@@ -815,6 +877,7 @@ fn image_response(bytes: Vec<u8>, content_type: &'static str) -> Response {
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, max-age=604800, immutable"),
     );
+    // 图标可能因登录状态不同而不同，缓存要按 Cookie 区分。
     headers.append(header::VARY, HeaderValue::from_static("Cookie"));
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
@@ -832,13 +895,14 @@ fn image_response(bytes: Vec<u8>, content_type: &'static str) -> Response {
 }
 
 /* ------------------------------------------------------------------ */
-/* Settings (shared across devices)                                    */
+/* 设置（多设备同步）                                                  */
 /* ------------------------------------------------------------------ */
 
 async fn settings_handler(State(state): State<AppState>) -> AppResult<Json<SettingsDto>> {
     Ok(Json(crate::db::load_settings(&state.pool).await?))
 }
 
+/// 保存外观设置；只覆盖请求里出现的字段。
 async fn save_settings_handler(
     State(state): State<AppState>,
     Json(body): Json<SettingsUpdate>,
@@ -847,6 +911,7 @@ async fn save_settings_handler(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// 保存某个面板的瀑布流排版。
 async fn save_layout_handler(
     State(state): State<AppState>,
     Path(board_id): Path<i64>,
@@ -859,15 +924,17 @@ async fn save_layout_handler(
 }
 
 /* ------------------------------------------------------------------ */
-/* Import / export                                                     */
+/* 导入 / 导出                                                         */
 /* ------------------------------------------------------------------ */
 
+/// 导入 Tabnest 自己的 JSON 备份。
 async fn import_json(State(state): State<AppState>, body: String) -> AppResult<Json<Value>> {
     let import::ImportPayload {
         boards,
         appearance,
     } = import::parse_json(&body)
         .map_err(|error| AppError::bad_request(format!("JSON 解析失败：{error}")))?;
+    // 在写库之前先做上限检查，避免半途失败。
     if boards.len() > 200 {
         return Err(AppError::bad_request("面板数量过多（最多 200 个）"));
     }
@@ -876,8 +943,8 @@ async fn import_json(State(state): State<AppState>, body: String) -> AppResult<J
     }
     let (stats, imported) = crate::db::import_boards(&state.pool, boards).await?;
 
-    // Restore the masonry layout of every board that carried one, mapping the
-    // exported column names onto the ids assigned by this import.
+    // 还原每个面板的瀑布流排版：导出文件里存的是分组「名称」，
+    // 这里要映射到本次导入新分配的分组 id 上。
     for board in &imported {
         let Some(layout) = board.layout.as_ref() else {
             continue;
@@ -886,11 +953,13 @@ async fn import_json(State(state): State<AppState>, body: String) -> AppResult<J
         if resolved.iter().all(Vec::is_empty) {
             continue;
         }
+        // 排版还原失败只记日志，不影响书签本身导入成功。
         if let Err(error) = crate::db::save_layout(&state.pool, board.id, &resolved).await {
             tracing::warn!("layout restore failed: {}", error.message);
         }
     }
 
+    // 外观设置同理：尽力还原，失败不报错。
     if let Some(appearance) = appearance {
         let update = SettingsUpdate {
             theme: appearance.theme,
@@ -910,10 +979,12 @@ async fn import_json(State(state): State<AppState>, body: String) -> AppResult<J
     ))
 }
 
+/// 导入浏览器导出的 Netscape 书签 HTML。
 async fn import_html(State(state): State<AppState>, body: String) -> AppResult<Json<Value>> {
     if body.len() > 20 * 1024 * 1024 {
         return Err(AppError::bad_request("文件太大"));
     }
+    // 先解析 Tabnest 自己附加的排版注释，再解析书签树。
     let meta = tabnest_core::import::parse_html_meta(&body);
     let boards = import::parse_netscape(&body);
     if boards.len() > 500 {
@@ -923,6 +994,7 @@ async fn import_html(State(state): State<AppState>, body: String) -> AppResult<J
 
     let imported_ids: Vec<i64> = imported.iter().map(|board| board.id).collect();
 
+    // 还原排版与外观，失败仅记录日志。
     if let Some(meta) = meta {
         for (board_id, layout) in tabnest_core::import::match_layouts(&meta, &imported) {
             if let Err(error) = crate::db::save_layout(&state.pool, board_id, &layout).await {
@@ -947,6 +1019,7 @@ async fn import_html(State(state): State<AppState>, body: String) -> AppResult<J
     ))
 }
 
+/// 导出完整备份为 JSON 文件。
 async fn export_json(State(state): State<AppState>) -> AppResult<Response> {
     let snapshot = load_state(&state.pool).await?;
     let settings = crate::db::load_settings(&state.pool).await?;
@@ -964,8 +1037,8 @@ async fn export_json(State(state): State<AppState>) -> AppResult<Response> {
                 .iter()
                 .map(|column| (column.id, column.name.as_str()))
                 .collect();
-            // Layout is exported by column *name* because ids are reassigned
-            // when the file is imported somewhere else.
+            // 排版按分组「名称」导出：导入到别处时 id 会重新分配，
+            // 只有名称能跨实例对应上。
             let layout: Option<Vec<Vec<String>>> = settings.layouts.get(&board.id).map(|groups| {
                 groups
                     .iter()
@@ -1013,6 +1086,7 @@ async fn export_json(State(state): State<AppState>) -> AppResult<Response> {
     ))
 }
 
+/// 导出为浏览器通用的 Netscape 书签 HTML。
 async fn export_html(State(state): State<AppState>) -> AppResult<Response> {
     let snapshot = load_state(&state.pool).await?;
     let settings = crate::db::load_settings(&state.pool).await?;
@@ -1024,8 +1098,8 @@ async fn export_html(State(state): State<AppState>) -> AppResult<Response> {
          <H1>Tabnest Bookmarks</H1>\n",
     );
 
-    // Netscape HTML has no notion of the masonry layout, so it rides along in a
-    // base64 comment that browsers ignore and Tabnest reads back on import.
+    // Netscape 格式没有瀑布流排版的概念，于是把排版信息塞进一段 base64 注释：
+    // 浏览器导入时会忽略，Tabnest 再次导入时能读回来。
     let meta = tabnest_core::import::LayoutMeta {
         appearance: Some(tabnest_core::import::ImportAppearance {
             theme: settings.theme.clone(),
@@ -1066,6 +1140,7 @@ async fn export_html(State(state): State<AppState>) -> AppResult<Response> {
     html.push_str(&meta.to_comment());
     html.push_str("\n<DL><p>\n");
 
+    // 书签层级：面板 -> 分组 -> 书签（备注写成 <DD>）。
     for board in &snapshot.boards {
         html.push_str(&format!(
             "    <DT><H3>{}</H3>\n    <DL><p>\n",
@@ -1102,6 +1177,7 @@ async fn export_html(State(state): State<AppState>) -> AppResult<Response> {
     ))
 }
 
+/// 构造下载响应：指定文件名并禁止缓存。
 fn attachment(body: String, content_type: &'static str, disposition: &'static str) -> Response {
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
@@ -1114,9 +1190,10 @@ fn attachment(body: String, content_type: &'static str, disposition: &'static st
 }
 
 /* ------------------------------------------------------------------ */
-/* Helpers                                                             */
+/* 辅助函数                                                            */
 /* ------------------------------------------------------------------ */
 
+/// 清洗名称：控制字符替换为空格、去掉首尾空白，校验非空且不超过 60 字符。
 fn clean_name(raw: &str, label: &str) -> AppResult<String> {
     let cleaned: String = raw
         .chars()
@@ -1132,12 +1209,14 @@ fn clean_name(raw: &str, label: &str) -> AppResult<String> {
     Ok(name.to_string())
 }
 
+/// 清洗图标字段：去空白、空串视为没有，最长 2048 字符。
 fn clean_icon(icon: Option<String>) -> Option<String> {
     icon.map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .map(|value| truncate_chars(&value, 2048))
 }
 
+/// 确认面板存在，否则返回 404。
 async fn ensure_board(pool: &SqlitePool, id: i64) -> AppResult<()> {
     let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM boards WHERE id = ?")
         .bind(id)
@@ -1146,6 +1225,7 @@ async fn ensure_board(pool: &SqlitePool, id: i64) -> AppResult<()> {
     exists.map(|_| ()).ok_or_else(|| AppError::not_found("面板不存在"))
 }
 
+/// 确认分组存在，否则返回 404。
 async fn ensure_column(pool: &SqlitePool, id: i64) -> AppResult<()> {
     let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM columns WHERE id = ?")
         .bind(id)
@@ -1156,6 +1236,7 @@ async fn ensure_column(pool: &SqlitePool, id: i64) -> AppResult<()> {
         .ok_or_else(|| AppError::not_found("分组不存在"))
 }
 
+/// 更新 / 删除影响 0 行时视为目标不存在，返回 404。
 fn ensure_affected(rows: u64) -> AppResult<()> {
     if rows == 0 {
         Err(AppError::not_found("记录不存在"))
@@ -1164,6 +1245,7 @@ fn ensure_affected(rows: u64) -> AppResult<()> {
     }
 }
 
+/// HTML 文本转义。
 fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -1172,6 +1254,7 @@ fn escape_html(value: &str) -> String {
         .replace('"', "&quot;")
 }
 
+/// HTML 属性值转义（在文本转义基础上再处理单引号）。
 fn escape_attr(value: &str) -> String {
     escape_html(value).replace('\'', "&#39;")
 }

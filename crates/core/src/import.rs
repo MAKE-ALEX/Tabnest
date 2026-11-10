@@ -1,4 +1,4 @@
-//! Parsing of bookmark payloads produced by browsers and by Tabnest itself.
+//! 浏览器导出文件与 Tabnest 自身导出数据的解析逻辑。
 
 use std::sync::OnceLock;
 
@@ -8,14 +8,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::html::{attr_value, decode_entities, truncate_chars};
 
+/// 一次 JSON 导入的完整内容。
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ImportPayload {
     pub boards: Vec<ImportBoard>,
-    /// Optional appearance + masonry layout written by a Tabnest export.
+    /// Tabnest 导出文件里可能附带的外观与瀑布流排版。
     pub appearance: Option<ImportAppearance>,
 }
 
+/// 随导入一起恢复的外观偏好。
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ImportAppearance {
@@ -25,16 +27,18 @@ pub struct ImportAppearance {
     pub active_board: Option<i64>,
 }
 
+/// 导入文件中的一个面板。
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ImportBoard {
     pub name: String,
     pub columns: Vec<ImportColumn>,
-    /// Masonry layout as column **names**: `[["网盘", "邮箱"], ["云平台"]]`.
-    /// Names are used because ids are reassigned on import.
+    /// 瀑布流排版，用分组**名称**表示：`[["网盘", "邮箱"], ["云平台"]]`。
+    /// 之所以不用 id，是因为导入时数据库会重新分配 id。
     pub layout: Option<Vec<Vec<String>>>,
 }
 
+/// 导入文件中的一个分组。
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ImportColumn {
@@ -42,6 +46,7 @@ pub struct ImportColumn {
     pub links: Vec<ImportLink>,
 }
 
+/// 导入文件中的一张书签。
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ImportLink {
@@ -51,21 +56,23 @@ pub struct ImportLink {
     pub icon: Option<String>,
 }
 
-/// A board that was actually written, with the data needed to restore its
-/// layout after ids have been assigned.
+/// 已经真正写入数据库的面板，附带恢复排版所需的信息。
 #[derive(Debug, Default)]
 pub struct ImportedBoard {
     pub name: String,
+    /// 新分配的面板 id。
     pub id: i64,
+    /// 分组「名称 -> 新 id」的对应关系。
     pub columns: Vec<(String, i64)>,
     pub layout: Option<Vec<Vec<String>>>,
 }
 
-/// Layout + appearance embedded in the Netscape HTML export as a base64
-/// comment, so HTML backups keep the visual arrangement too (browsers ignore
-/// the comment, Tabnest reads it back).
+/// 以 base64 注释形式嵌在 Netscape HTML 导出文件里的排版 + 外观信息。
+/// 浏览器会忽略注释，Tabnest 重新导入时再读回来，这样 HTML 备份也能保留
+/// 视觉排版。
 pub const HTML_META_PREFIX: &str = "tabnest-meta:";
 
+/// HTML 注释里携带的元信息。
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LayoutMeta {
@@ -73,6 +80,7 @@ pub struct LayoutMeta {
     pub boards: Vec<BoardLayoutMeta>,
 }
 
+/// 单个面板在 HTML 注释中保存的排版。
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BoardLayoutMeta {
@@ -81,6 +89,7 @@ pub struct BoardLayoutMeta {
 }
 
 impl LayoutMeta {
+    /// 序列化成 `<!-- tabnest-meta:<base64> -->` 形式的 HTML 注释。
     pub fn to_comment(&self) -> String {
         let json = serde_json::to_vec(self).unwrap_or_default();
         let encoded = base64::engine::general_purpose::STANDARD.encode(json);
@@ -88,7 +97,7 @@ impl LayoutMeta {
     }
 }
 
-/// Read the metadata comment written by [`LayoutMeta::to_comment`].
+/// 读取 [`LayoutMeta::to_comment`] 写出的元信息注释；不存在或格式错误时返回 `None`。
 pub fn parse_html_meta(html: &str) -> Option<LayoutMeta> {
     let start = html.find(HTML_META_PREFIX)? + HTML_META_PREFIX.len();
     let rest = &html[start..];
@@ -100,12 +109,15 @@ pub fn parse_html_meta(html: &str) -> Option<LayoutMeta> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Pair metadata boards with the boards this import created, matching by name
-/// in order (so duplicate board names keep their own layout).
+/// 把元信息里的面板与本次实际导入的面板按名称配对。
+///
+/// 按顺序消费元信息，这样即使有重名面板，各自也能拿回自己的排版。
+/// 返回 `(面板 id, 分组 id 排版)` 列表。
 pub fn match_layouts(
     meta: &LayoutMeta,
     imported: &[ImportedBoard],
 ) -> Vec<(i64, Vec<Vec<i64>>)> {
+    // 记录元信息中的每个面板是否已经被匹配过。
     let mut remaining: Vec<bool> = vec![true; meta.boards.len()];
     let mut result = Vec::new();
 
@@ -120,6 +132,7 @@ pub fn match_layouts(
         };
         remaining[index] = false;
         let resolved = resolve_layout(&meta.boards[index].layout, &board.columns);
+        // 排版里至少要有一个非空分组才值得写回数据库。
         if resolved.iter().any(|group| !group.is_empty()) {
             result.push((board.id, resolved));
         }
@@ -128,15 +141,17 @@ pub fn match_layouts(
     result
 }
 
+/// 解析 Tabnest 的 JSON 导出文件。
 pub fn parse_json(text: &str) -> anyhow::Result<ImportPayload> {
     Ok(serde_json::from_str(text)?)
 }
 
-/// Map `[[column name, ...], ...]` onto the freshly inserted column ids.
+/// 把 `[[分组名称, ...], ...]` 映射成新插入分组对应的 id。
 ///
-/// Duplicate names are matched in first-seen order so a board with two
-/// "全部" columns still restores its exact arrangement.
+/// 重名分组按「首次出现」的顺序匹配，因此一个面板里有两个「全部」分组时，
+/// 也能还原各自的准确位置。
 pub fn resolve_layout(layout: &[Vec<String>], columns: &[(String, i64)]) -> Vec<Vec<i64>> {
+    // 每个分组 id 只能用一次，用过就置为 None。
     let mut remaining: Vec<Option<i64>> = columns.iter().map(|(_, id)| Some(*id)).collect();
 
     layout
@@ -158,6 +173,8 @@ pub fn resolve_layout(layout: &[Vec<String>], columns: &[(String, i64)]) -> Vec<
         .collect()
 }
 
+/// 一次匹配 Netscape 书签文件中的一个结构：文件夹标题、书签链接、
+/// `<dl>` 开始或结束。
 fn tag_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -168,15 +185,17 @@ fn tag_re() -> &'static Regex {
     })
 }
 
-/// Parse a Netscape bookmark file (the format every browser can export).
+/// 解析 Netscape 书签文件（所有主流浏览器都能导出的格式）。
 ///
-/// Folder mapping is intentionally simple:
-///   * first-level folder  -> board
-///   * deeper folders      -> column ("parent / child" when nested further)
-///   * links outside any folder end up in "导入的书签 / 全部"
+/// 层级映射刻意保持简单：
+///   * 一级文件夹 -> 面板；
+///   * 更深层的文件夹 -> 分组（再嵌套时用 `父 / 子` 拼接名称）；
+///   * 不在任何文件夹里的书签 -> 「导入的书签 / 全部」。
 pub fn parse_netscape(html: &str) -> Vec<ImportBoard> {
     let mut boards: Vec<ImportBoard> = Vec::new();
+    // 当前打开的文件夹路径，下标对应嵌套层级。
     let mut folders: Vec<String> = Vec::new();
+    // `<dl>` 嵌套深度。
     let mut depth: usize = 0;
 
     for captures in tag_re().captures_iter(html) {
@@ -186,8 +205,7 @@ pub fn parse_netscape(html: &str) -> Vec<ImportBoard> {
         }
         if captures.name("dl_close").is_some() {
             depth = depth.saturating_sub(1);
-            // Links inside the list we just left can no longer belong to the
-            // folder that owned it.
+            // 列表已经结束，里面的书签不可能再属于拥有该列表的文件夹。
             folders.truncate(depth.saturating_sub(1));
             continue;
         }
@@ -197,10 +215,13 @@ pub fn parse_netscape(html: &str) -> Vec<ImportBoard> {
             if name.is_empty() {
                 continue;
             }
+            // `<dl>` 的深度比文件夹层级多 1。
             let level = depth.max(1) - 1;
+            // 新文件夹会覆盖同一层及更深的旧路径。
             if folders.len() > level {
                 folders.truncate(level);
             }
+            // 层级跳跃时用空字符串补位，保持下标与层级对应。
             while folders.len() < level {
                 folders.push(String::new());
             }
@@ -215,6 +236,7 @@ pub fn parse_netscape(html: &str) -> Vec<ImportBoard> {
             continue;
         };
         let href = decode_entities(href.trim());
+        // 只导入真正的网页书签，跳过 javascript: / place: 等内部地址。
         if !(href.starts_with("http://") || href.starts_with("https://")) {
             continue;
         }
@@ -224,11 +246,13 @@ pub fn parse_netscape(html: &str) -> Vec<ImportBoard> {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| href.clone());
 
+        // 一级文件夹名就是面板名；没有文件夹时归入默认面板。
         let board_name = folders
             .first()
             .filter(|name| !name.is_empty())
             .cloned()
             .unwrap_or_else(|| "导入的书签".to_string());
+        // 除一级文件夹外的所有层级拼成分组名。
         let contexts: Vec<&str> = folders
             .iter()
             .take(depth.saturating_sub(1))
@@ -242,6 +266,7 @@ pub fn parse_netscape(html: &str) -> Vec<ImportBoard> {
             contexts.join(" / ")
         };
 
+        // 复用同名面板，不存在则新建（最多 500 个，防止异常文件撑爆内存）。
         let board_index = match boards.iter().position(|board| board.name == board_name) {
             Some(index) => index,
             None => {
@@ -257,6 +282,7 @@ pub fn parse_netscape(html: &str) -> Vec<ImportBoard> {
             }
         };
         let board = &mut boards[board_index];
+        // 同理复用同名分组。
         let column_index = match board
             .columns
             .iter()
@@ -282,6 +308,7 @@ pub fn parse_netscape(html: &str) -> Vec<ImportBoard> {
     boards
 }
 
+/// 清理 HTML 中的文本：解码实体、折叠空白、截断到 300 字符。
 fn clean_text(raw: &str) -> String {
     let decoded = decode_entities(raw);
     let collapsed = decoded.split_whitespace().collect::<Vec<_>>().join(" ");

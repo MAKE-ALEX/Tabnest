@@ -1,8 +1,8 @@
-//! D1 persistence layer.
+//! D1 持久化层。
 //!
-//! SQL mirrors the native `sqlx` queries in `src/api.rs` / `src/db.rs`; the
-//! differences are D1's API shape: `RETURNING id` instead of
-//! `last_insert_rowid()`, and `batch()` instead of interactive transactions.
+//! 这里的 SQL 与原生端 `src/api.rs` / `src/db.rs` 中的 `sqlx` 查询一一对应，
+//! 差异来自 D1 的 API 形态：用 `RETURNING id` 代替 `last_insert_rowid()`，
+//! 用 `batch()` 代替可交互事务。
 
 use std::collections::HashSet;
 
@@ -14,15 +14,23 @@ use worker::d1::{D1Database, D1PreparedStatement, D1Type};
 
 use crate::error::{AppError, AppResult};
 
+/// 单次导入允许写入的链接上限，防止一次请求撑爆 D1 写入配额。
 const MAX_LINKS: usize = 20_000;
+/// 单次导入允许创建的面板上限。
 const MAX_BOARDS: usize = 500;
+/// 单次导入允许创建的分组上限。
 const MAX_COLUMNS: usize = 2000;
 
+/// 把 `worker::Error` 统一收敛成 500，同时把原始错误打到 Workers 日志。
 fn dberr(error: worker::Error) -> AppError {
     worker::console_error!("d1 error: {error} ({error:?})");
     AppError::internal("数据库操作失败")
 }
 
+/// 预编译 SQL；没有绑定参数时直接返回语句本身。
+///
+/// D1 的 `bind_refs` 需要借用参数，因此这里让 `args` 按值传入、由调用方持有，
+/// 语句内部只保存引用。
 fn prepare<'a>(
     db: &D1Database,
     sql: &str,
@@ -36,6 +44,7 @@ fn prepare<'a>(
     }
 }
 
+/// 执行查询并把所有结果行反序列化为 `T`。
 async fn query_all<T>(db: &D1Database, sql: &str, args: Vec<D1Type<'_>>) -> AppResult<Vec<T>>
 where
     T: for<'de> Deserialize<'de>,
@@ -45,6 +54,7 @@ where
     result.results::<T>().map_err(dberr)
 }
 
+/// 执行查询并取第一行；没有结果时返回 `None`。
 async fn query_one<T>(db: &D1Database, sql: &str, args: Vec<D1Type<'_>>) -> AppResult<Option<T>>
 where
     T: for<'de> Deserialize<'de>,
@@ -53,6 +63,7 @@ where
     statement.first::<T>(None).await.map_err(dberr)
 }
 
+/// 执行写语句，返回受影响行数；D1 没给出 changes 时按 1 处理。
 async fn execute(db: &D1Database, sql: &str, args: Vec<D1Type<'_>>) -> AppResult<i64> {
     let statement = prepare(db, sql, args)?;
     let result = statement.run().await.map_err(dberr)?;
@@ -60,6 +71,7 @@ async fn execute(db: &D1Database, sql: &str, args: Vec<D1Type<'_>>) -> AppResult
     Ok(changed.unwrap_or(1) as i64)
 }
 
+/// 读取单个整数标量（例如 `COUNT(*)`），无行时按 0 处理。
 async fn scalar_i64(db: &D1Database, sql: &str, args: Vec<D1Type<'_>>) -> AppResult<i64> {
     #[derive(Deserialize)]
     struct Value {
@@ -69,6 +81,7 @@ async fn scalar_i64(db: &D1Database, sql: &str, args: Vec<D1Type<'_>>) -> AppRes
     Ok(row.map(|row| row.value).unwrap_or(0))
 }
 
+/// 执行带 `RETURNING id` 的插入并取出新行主键。
 async fn insert_returning_id(db: &D1Database, sql: &str, args: Vec<D1Type<'_>>) -> AppResult<i64> {
     #[derive(Deserialize)]
     struct Id {
@@ -79,23 +92,26 @@ async fn insert_returning_id(db: &D1Database, sql: &str, args: Vec<D1Type<'_>>) 
         .ok_or_else(|| AppError::internal("数据库未返回自增 ID"))
 }
 
+/// D1 的 INTEGER 是 32 位有符号整数，这里统一做一次窄化。
 fn int(value: i64) -> D1Type<'static> {
     D1Type::Integer(value as i32)
 }
 
+/// 文本参数的简写，省去每处都写 `D1Type::Text`。
 fn text(value: &str) -> D1Type<'_> {
     D1Type::Text(value)
 }
 
 /* ------------------------------------------------------------------ */
-/* Schema + demo data                                                  */
+/* 建表 + 演示数据                                                     */
 /* ------------------------------------------------------------------ */
 
 const SCHEMA: &str = include_str!("../schema.sql");
 
+/// 建表并按需灌入演示数据。
 pub async fn bootstrap(db: &D1Database, seed_demo: bool) -> AppResult<()> {
-    // D1's `exec()` support for multi-statement strings differs between the
-    // runtime and Miniflare, so apply the schema as an atomic batch instead.
+    // D1 的 `exec()` 对多语句字符串的支持在运行时和 Miniflare 之间并不一致，
+    // 因此改为把 schema 拆成语句、以原子 batch 的方式提交。
     let mut statements = Vec::new();
     for statement in SCHEMA.split(';') {
         let statement = statement.trim();
@@ -115,6 +131,7 @@ pub async fn bootstrap(db: &D1Database, seed_demo: bool) -> AppResult<()> {
     seed_demo_data(db).await
 }
 
+/// 写入一套演示面板；只在库里没有任何面板时调用。
 async fn seed_demo_data(db: &D1Database) -> AppResult<()> {
     let demo: Vec<(&str, Vec<(&str, Vec<(&str, &str, &str)>)>)> = vec![(
         "我的主页",
@@ -140,8 +157,7 @@ async fn seed_demo_data(db: &D1Database) -> AppResult<()> {
     )];
 
     for (board_position, (board_name, columns)) in demo.iter().enumerate() {
-        // The first board is inserted conditionally so two isolates racing on a
-        // fresh database cannot create the demo twice.
+        // 第一个面板用条件插入，避免两个 isolate 在空库上同时冷启动时把演示数据写两遍。
         let board_id = if board_position == 0 {
             let created = execute(
                 db,
@@ -204,7 +220,7 @@ async fn seed_demo_data(db: &D1Database) -> AppResult<()> {
 }
 
 /* ------------------------------------------------------------------ */
-/* State                                                               */
+/* 整体状态                                                            */
 /* ------------------------------------------------------------------ */
 
 #[derive(Deserialize)]
@@ -234,6 +250,10 @@ struct LinkRow {
     created_at: String,
 }
 
+/// 一次性读出全部面板/分组/链接，再在内存里组装成嵌套的 `StateDto`。
+///
+/// 相比逐层 N+1 查询，这里固定只发三条 SQL；三张表都按 `position, id` 排序，
+/// 所以读出来的顺序就是前端应展示的顺序。
 pub async fn load_state(db: &D1Database) -> AppResult<StateDto> {
     let boards: Vec<BoardRow> = query_all(
         db,
@@ -255,6 +275,7 @@ pub async fn load_state(db: &D1Database) -> AppResult<StateDto> {
     )
     .await?;
 
+    // 用两级索引把「数据库行」映射到「结果集中的下标」，避免反复线性查找。
     let mut board_index = std::collections::HashMap::new();
     let mut column_index = std::collections::HashMap::new();
     let mut result = StateDto {
@@ -271,6 +292,7 @@ pub async fn load_state(db: &D1Database) -> AppResult<StateDto> {
         });
     }
     for column in columns {
+        // 父面板不存在时静默丢弃该分组，保持与原生端一致。
         if let Some(&index) = board_index.get(&column.board_id) {
             let position = result.boards[index].columns.len();
             result.boards[index].columns.push(ColumnDto {
@@ -301,9 +323,10 @@ pub async fn load_state(db: &D1Database) -> AppResult<StateDto> {
 }
 
 /* ------------------------------------------------------------------ */
-/* Boards                                                              */
+/* 面板                                                                */
 /* ------------------------------------------------------------------ */
 
+/// 新建面板，位置追加到当前最大值之后。
 pub async fn create_board(db: &D1Database, name: &str) -> AppResult<i64> {
     insert_returning_id(
         db,
@@ -315,6 +338,7 @@ pub async fn create_board(db: &D1Database, name: &str) -> AppResult<i64> {
     .await
 }
 
+/// 重命名面板，返回受影响行数（0 表示面板不存在）。
 pub async fn update_board(db: &D1Database, id: i64, name: &str) -> AppResult<i64> {
     execute(
         db,
@@ -324,10 +348,12 @@ pub async fn update_board(db: &D1Database, id: i64, name: &str) -> AppResult<i64
     .await
 }
 
+/// 删除面板；其下分组与链接由外键级联清理。
 pub async fn delete_board(db: &D1Database, id: i64) -> AppResult<i64> {
     execute(db, "DELETE FROM boards WHERE id = ?", vec![int(id)]).await
 }
 
+/// 按传入顺序重写面板的 `position`。
 pub async fn order_boards(db: &D1Database, ids: &[i64]) -> AppResult<()> {
     let mut statements = Vec::with_capacity(ids.len());
     for (index, id) in ids.iter().enumerate() {
@@ -343,6 +369,7 @@ pub async fn order_boards(db: &D1Database, ids: &[i64]) -> AppResult<()> {
     Ok(())
 }
 
+/// 判断面板是否存在。
 pub async fn board_exists(db: &D1Database, id: i64) -> AppResult<bool> {
     let count = scalar_i64(
         db,
@@ -354,9 +381,10 @@ pub async fn board_exists(db: &D1Database, id: i64) -> AppResult<bool> {
 }
 
 /* ------------------------------------------------------------------ */
-/* Columns                                                             */
+/* 分组                                                                */
 /* ------------------------------------------------------------------ */
 
+/// 在指定面板下新建分组，位置取该面板内的最大值 +1。
 pub async fn create_column(db: &D1Database, board_id: i64, name: &str) -> AppResult<i64> {
     insert_returning_id(
         db,
@@ -368,6 +396,7 @@ pub async fn create_column(db: &D1Database, board_id: i64, name: &str) -> AppRes
     .await
 }
 
+/// 重命名分组。
 pub async fn update_column(db: &D1Database, id: i64, name: &str) -> AppResult<i64> {
     execute(
         db,
@@ -377,10 +406,13 @@ pub async fn update_column(db: &D1Database, id: i64, name: &str) -> AppResult<i6
     .await
 }
 
+/// 删除分组；组内链接随外键级联删除。
 pub async fn delete_column(db: &D1Database, id: i64) -> AppResult<i64> {
     execute(db, "DELETE FROM columns WHERE id = ?", vec![int(id)]).await
 }
 
+/// 重排分组：同时写入新的 `position` 与所属 `board_id`，
+/// 因此这个接口也承担「跨面板移动分组」的职责。
 pub async fn order_columns(db: &D1Database, board_id: i64, ids: &[i64]) -> AppResult<()> {
     let mut statements = Vec::with_capacity(ids.len());
     for (index, id) in ids.iter().enumerate() {
@@ -396,6 +428,7 @@ pub async fn order_columns(db: &D1Database, board_id: i64, ids: &[i64]) -> AppRe
     Ok(())
 }
 
+/// 判断分组是否存在。
 pub async fn column_exists(db: &D1Database, id: i64) -> AppResult<bool> {
     let count = scalar_i64(
         db,
@@ -407,9 +440,10 @@ pub async fn column_exists(db: &D1Database, id: i64) -> AppResult<bool> {
 }
 
 /* ------------------------------------------------------------------ */
-/* Links                                                               */
+/* 链接                                                                */
 /* ------------------------------------------------------------------ */
 
+/// 更新/移动链接时需要的旧值快照。
 #[derive(Deserialize)]
 pub struct StoredLink {
     pub url: String,
@@ -419,6 +453,7 @@ pub struct StoredLink {
     pub column_id: i64,
 }
 
+/// 按 ID 取链接的当前内容。
 pub async fn get_link(db: &D1Database, id: i64) -> AppResult<Option<StoredLink>> {
     query_one(
         db,
@@ -428,6 +463,7 @@ pub async fn get_link(db: &D1Database, id: i64) -> AppResult<Option<StoredLink>>
     .await
 }
 
+/// 在分组末尾追加一条链接。
 pub async fn create_link(
     db: &D1Database,
     column_id: i64,
@@ -453,6 +489,7 @@ pub async fn create_link(
     .await
 }
 
+/// 计算分组内下一个可用位置（可能被调用方用于插入前的校验）。
 pub async fn next_link_position(db: &D1Database, column_id: i64) -> AppResult<i64> {
     scalar_i64(
         db,
@@ -462,6 +499,8 @@ pub async fn next_link_position(db: &D1Database, column_id: i64) -> AppResult<i6
     .await
 }
 
+/// 更新链接。传入 `position` 时一并移动到目标分组的指定位置，
+/// 否则只改内容、保留原归属与顺序。
 pub async fn update_link(
     db: &D1Database,
     id: i64,
@@ -503,10 +542,13 @@ pub async fn update_link(
     }
 }
 
+/// 删除链接。
 pub async fn delete_link(db: &D1Database, id: i64) -> AppResult<i64> {
     execute(db, "DELETE FROM links WHERE id = ?", vec![int(id)]).await
 }
 
+/// 批量重排链接：`columns` 中每一项是「目标分组 + 该组内的链接顺序」，
+/// 一次 batch 写入完成跨组拖动。
 pub async fn arrange_links(db: &D1Database, columns: &[(i64, Vec<i64>)]) -> AppResult<()> {
     let mut statements = Vec::new();
     for (column_id, link_ids) in columns {
@@ -525,9 +567,10 @@ pub async fn arrange_links(db: &D1Database, columns: &[(i64, Vec<i64>)]) -> AppR
 }
 
 /* ------------------------------------------------------------------ */
-/* Import                                                              */
+/* 导入                                                                */
 /* ------------------------------------------------------------------ */
 
+/// 一次导入的统计结果，直接回给前端展示。
 #[derive(Debug, Default, Serialize)]
 pub struct ImportStats {
     pub boards: usize,
@@ -536,6 +579,10 @@ pub struct ImportStats {
     pub skipped: usize,
 }
 
+/// 把解析好的书签批量写入 D1。
+///
+/// 规则与原生端一致：URL 先去重（库内已有的 + 本次已见过的），
+/// 标题为空时退化成域名，标题/备注按字符数截断，达到上限后跳过并计数。
 pub async fn import_boards(
     db: &D1Database,
     boards: Vec<ImportBoard>,
@@ -555,6 +602,7 @@ pub async fn import_boards(
     let mut imported: Vec<ImportedBoard> = Vec::new();
 
     for board in boards {
+        // 链接总数触顶后，后面的面板一律跳过。
         if stats.links >= MAX_LINKS {
             stats.skipped += 1;
             break;
@@ -569,6 +617,7 @@ pub async fn import_boards(
         let board_id = create_board_positioned(db, &board_name).await?;
         stats.boards += 1;
 
+        // 记录「分组名 -> 新 ID」，供导入结果回传前端做定向跳转。
         let mut inserted_columns: Vec<(String, i64)> = Vec::new();
         for column in board.columns {
             let column_name = fallback_name(&column.name, "导入的分组");
@@ -583,6 +632,7 @@ pub async fn import_boards(
                     stats.skipped += 1;
                     continue;
                 }
+                // 非法 URL（含非 http(s) 协议）与重复 URL 都只计数、不入库。
                 let Ok(url) = tabnest_core::url::normalize_url(&link.url) else {
                     stats.skipped += 1;
                     continue;
@@ -634,9 +684,10 @@ pub async fn import_boards(
 }
 
 /* ------------------------------------------------------------------ */
-/* Settings (shared across devices)                                    */
+/* 设置（跨设备共享）                                                  */
 /* ------------------------------------------------------------------ */
 
+/// 读取全局设置与各面板的排版。
 pub async fn load_settings(db: &D1Database) -> AppResult<SettingsDto> {
     #[derive(Deserialize)]
     struct SettingsRow {
@@ -665,6 +716,7 @@ pub async fn load_settings(db: &D1Database) -> AppResult<SettingsDto> {
         settings.active_board = row.active_board;
     }
 
+    // 版式以 JSON 字符串存储，解析失败（脏数据/旧格式）时跳过该面板即可。
     let rows: Vec<LayoutRow> = query_all(db, "SELECT board_id, layout FROM board_layouts", vec![]).await?;
     for row in rows {
         if let Ok(layout) = serde_json::from_str::<Vec<Vec<i64>>>(&row.layout) {
@@ -674,11 +726,14 @@ pub async fn load_settings(db: &D1Database) -> AppResult<SettingsDto> {
     Ok(settings)
 }
 
+/// 保存设置；`ON CONFLICT` 时用 `COALESCE` 合并，
+/// 因此只传部分字段不会清空其它已有设置。
 pub async fn save_settings(db: &D1Database, update: SettingsUpdate) -> AppResult<()> {
     let theme = update.theme.filter(|value| valid_theme(value));
     let palette = update.palette.filter(|value| valid_palette(value));
     let columns = update.columns.filter(|value| valid_columns(value));
 
+    // active_board 指向不存在的面板时按「未设置」处理。
     let active_board = match update.active_board {
         Some(id) if board_exists(db, id).await? => Some(id),
         _ => None,
@@ -705,6 +760,7 @@ pub async fn save_settings(db: &D1Database, update: SettingsUpdate) -> AppResult
     Ok(())
 }
 
+/// 保存单个面板的拖拽排版；面板不存在时返回 `false`。
 pub async fn save_layout(
     db: &D1Database,
     board_id: i64,
@@ -713,6 +769,7 @@ pub async fn save_layout(
     if !board_exists(db, board_id).await? {
         return Ok(false);
     }
+    // 写入前先做一次清洗，防止越界/重复的分组下标进入前端。
     let json = serde_json::to_string(&sanitize_layout(layout.to_vec()))?;
     execute(
         db,
@@ -724,6 +781,8 @@ pub async fn save_layout(
     Ok(true)
 }
 
+/// 建面板并置于末尾；导入路径专用，语义上是 `create_board` 的别名，
+/// 单独保留是为了让导入逻辑与原生端保持同名对应关系。
 async fn create_board_positioned(db: &D1Database, name: &str) -> AppResult<i64> {
     insert_returning_id(
         db,
@@ -735,6 +794,7 @@ async fn create_board_positioned(db: &D1Database, name: &str) -> AppResult<i64> 
     .await
 }
 
+/// 建分组并置于末尾；同样只是 `create_column` 的语义化别名。
 async fn create_column_positioned(
     db: &D1Database,
     board_id: i64,
@@ -743,6 +803,7 @@ async fn create_column_positioned(
     create_column(db, board_id, name).await
 }
 
+/// 取名字，空名退回默认值，过长的按字符截断到 60。
 fn fallback_name(name: &str, fallback: &str) -> String {
     let trimmed = name.trim();
     if trimmed.is_empty() {

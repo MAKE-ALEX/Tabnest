@@ -1,8 +1,8 @@
-//! Runtime-agnostic building blocks shared by the native server ([`tabnest`])
-//! and the Cloudflare Workers build ([`tabnest-worker`]).
+//! 原生服务端（[`tabnest`]）与 Cloudflare Workers 构建（[`tabnest-worker`]）共用的
+//! 运行时无关基础模块。
 //!
-//! Everything in here must compile for `wasm32-unknown-unknown`: no filesystem,
-//! no sockets, no clock. Callers pass timestamps and bytes in.
+//! 这里的代码必须能在 `wasm32-unknown-unknown` 目标上编译：不能直接使用文件系统、
+//! socket 或系统时钟；需要时间戳或字节数据时，一律由调用方传入。
 
 pub mod dto;
 pub mod html;
@@ -14,4 +14,5 @@ pub mod session;
 pub mod settings;
 pub mod url;
 
+// 页面元信息（网页标题、图标地址）类型，重新导出方便调用方直接引用。
 pub use html::PageMeta;

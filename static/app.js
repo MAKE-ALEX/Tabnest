@@ -1,13 +1,16 @@
 /* ============================================================
-   Tabnest front-end — vanilla JS, no build step.
+   Tabnest 前端脚本 —— 原生 JavaScript，无构建步骤。
+   整个文件包在一个 IIFE 里，避免污染全局命名空间。
    ============================================================ */
 
 (() => {
   'use strict';
 
+  // 选择器简写：$ 取第一个匹配元素，$$ 取全部并转成数组。
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 
+  // 内联 SVG 图标表，避免额外请求图标字体或图片资源。
   const SVG = {
     plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
     more: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>',
@@ -32,6 +35,7 @@
       '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.2 4.2L19 6.5"/></svg>',
   };
 
+  // 可选配色；id 会写进 <html data-palette>，由 CSS 变量决定具体颜色。
   const PALETTES = [
     { id: 'clay', name: '陶土' },
     { id: 'moss', name: '苔绿' },
@@ -41,12 +45,14 @@
     { id: 'amber', name: '琥珀' },
   ];
 
+  // 亮度模式；auto 表示跟随系统的 prefers-color-scheme。
   const MODES = [
     { id: 'light', name: '浅色' },
     { id: 'dark', name: '深色' },
     { id: 'auto', name: '跟随系统' },
   ];
 
+  // 每行分组列数；auto 表示按窗口宽度自动计算。
   const COLUMN_OPTIONS = [
     { id: 'auto', name: '自动' },
     { id: '2', name: '2' },
@@ -58,6 +64,7 @@
     { id: '8', name: '8' },
   ];
 
+  // 全局运行时状态：面板数据、当前选中项、搜索词与外观偏好。
   const state = {
     boards: [],
     activeId: null,
@@ -71,6 +78,7 @@
     appearanceEl: null,
   };
 
+  // 拖拽过程中的临时状态，dragend / drop 后统一清空。
   const drag = {
     payload: null,
     el: null,
@@ -85,6 +93,7 @@
     scrollFrame: 0,
   };
 
+  // 启动时缓存常用 DOM 节点，避免渲染逻辑里反复查询。
   const els = {
     sidebar: $('#sidebar'),
     scrim: $('#scrim'),
@@ -105,13 +114,15 @@
   };
 
   /* ----------------------------------------------------------
-     Utilities
+     通用工具
      ---------------------------------------------------------- */
 
+  // HTML 转义表：拼进 innerHTML 的所有用户数据都必须先经过 esc()。
   const ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (ch) => ESCAPE_MAP[ch]);
   const attr = esc;
 
+  // 取名称首个字母/数字作为占位图标，空名称退化成「·」。
   function initial(text) {
     const cleaned = String(text || '').trim();
     if (!cleaned) return '·';
@@ -119,6 +130,7 @@
     return (match ? match[0] : cleaned[0]).toUpperCase();
   }
 
+  // 由字符串散列出 6 种色块之一，保证同名面板/书签颜色稳定。
   function tint(text) {
     let hash = 0;
     for (const ch of String(text || '')) {
@@ -127,6 +139,7 @@
     return `tint-${hash % 6}`;
   }
 
+  // 由分组名散列出 9 种分类色，用于分组卡片的左侧色条。
   function categoryColor(text) {
     let hash = 0;
     for (const ch of String(text || '')) {
@@ -135,6 +148,7 @@
     return `cat-${hash % 9}`;
   }
 
+  // 从 URL 取主机名并去掉 www. 前缀；解析失败时原样返回。
   function hostOf(url) {
     try {
       return new URL(url).host.replace(/^www\./, '');
@@ -143,6 +157,7 @@
     }
   }
 
+  // 客户端 URL 规整：缺协议时补 https://，非 http(s) 视为无效。
   function normalizeClient(raw) {
     const value = String(raw || '').trim();
     if (!value) return '';
@@ -151,6 +166,7 @@
     return `https://${value}`;
   }
 
+  // 判断两个地址是否指向同一 URL（用于确认抓到的图标仍属于该站点）。
   function sameTarget(left, right) {
     try {
       return new URL(normalizeClient(left)).href === new URL(normalizeClient(right)).href;
@@ -159,6 +175,7 @@
     }
   }
 
+  // 轻量提示条，2.8 秒后自动淡出并移除。
   function toast(message, type = 'ok') {
     const el = document.createElement('div');
     el.className = type === 'error' ? 'toast error' : 'toast';
@@ -170,6 +187,7 @@
     }, 2800);
   }
 
+  // 统一请求封装：自动带 Cookie、按 Content-Type 解析，401 时弹出登录层。
   async function api(path, options = {}) {
     const init = {
       method: options.method || 'GET',
@@ -205,9 +223,10 @@
   }
 
   /* ----------------------------------------------------------
-     Boot & session
+     启动与会话
      ---------------------------------------------------------- */
 
+  // 启动流程：绑定事件 -> 应用外观 -> 查询会话 -> 同步设置 -> 加载数据。
   async function boot() {
     bindStatic();
     const params = new URLSearchParams(window.location.search);
@@ -250,6 +269,7 @@
     }
   }
 
+  // HTTP 下浏览器不会保存 Secure Cookie，这里显式提示改用 HTTPS。
   function updateLoginSchemeHint() {
     const hint = $('#login-hint');
     if (!hint) return;
@@ -261,6 +281,7 @@
     }
   }
 
+  // 显示登录遮罩并把焦点放到密码框。
   function showLogin() {
     closeMenu();
     closeAppearance();
@@ -272,6 +293,7 @@
     window.setTimeout(() => els.loginPassword?.focus(), 60);
   }
 
+  // 提交密码；成功后重新同步设置与数据。
   async function onLogin(event) {
     event.preventDefault();
     els.loginError.textContent = '';
@@ -303,11 +325,12 @@
     }
   }
 
+  // 退出登录：无论请求是否成功，本地界面与状态先清空。
   async function logout() {
     try {
       await api('/api/logout', { method: 'POST' });
     } catch (error) {
-      /* the local state is cleared either way */
+      /* 无论请求成功与否，本地状态都要清空 */
     }
     state.boards = [];
     state.activeId = null;
@@ -321,17 +344,20 @@
   }
 
   /* ----------------------------------------------------------
-     Appearance
+     外观与偏好
      ---------------------------------------------------------- */
 
+  // 读取系统的深浅色偏好。
   function systemTheme() {
     return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   }
 
+  // 按 id 查配色，找不到时退回第一个（陶土）。
   function paletteById(id) {
     return PALETTES.find((item) => item.id === id) || PALETTES[0];
   }
 
+  // 应用（并可选持久化）外观，同时更新 theme-color 与按钮提示。
   function applyAppearance(mode, palette, persist = true) {
     state.mode = MODES.some((item) => item.id === mode) ? mode : 'auto';
     state.palette = PALETTES.some((item) => item.id === palette) ? palette : 'clay';
@@ -358,6 +384,7 @@
     syncAppearancePanel();
   }
 
+  // 把当前「配色 · 模式 · 列数」写进外观按钮的 title。
   function updateAppearanceButton() {
     if (!els.themeBtn) return;
     const palette = paletteById(state.palette);
@@ -366,6 +393,7 @@
     els.themeBtn.title = `外观：${palette.name} · ${mode.name} · ${columns}`;
   }
 
+  // 应用每行列数；列数变化会触发一次主区域重排。
   function applyColumns(value, persist = true) {
     const valid = COLUMN_OPTIONS.some((item) => item.id === value) ? value : 'auto';
     state.columns = valid;
@@ -379,11 +407,12 @@
     if (state.boards.length && !state.query.trim()) renderMain();
   }
 
-  /* Preferences live in localStorage for instant paint and on the server so
-     every device shares them. Writes are debounced (dragging fires a lot). */
+  /* 偏好既存 localStorage（用于首帧即时生效），也存服务端（用于多设备共享）。
+     写回做防抖，因为拖拽等操作会短时间内触发大量变更。 */
   let settingsTimer = null;
   let pendingSettings = {};
 
+  // 设置写回服务端做 700ms 防抖，并合并连续修改。
   function queueSettings(partial) {
     Object.assign(pendingSettings, partial);
     clearTimeout(settingsTimer);
@@ -391,7 +420,7 @@
       const body = pendingSettings;
       pendingSettings = {};
       api('/api/settings', { method: 'PUT', body }).catch(() => {
-        /* offline or logged out: localStorage still has the value */
+        /* 离线或已退出登录时忽略失败：localStorage 里仍有该值 */
       });
     }, 700);
   }
@@ -399,6 +428,7 @@
   const pendingLayouts = new Map();
   let layoutTimer = null;
 
+  // 版式写回按面板合并、900ms 防抖，拖拽时不会打出大量请求。
   function queueLayout(boardId, visual) {
     pendingLayouts.set(String(boardId), visual);
     clearTimeout(layoutTimer);
@@ -411,14 +441,15 @@
     }, 900);
   }
 
-  /// Pull the shared preferences and seed localStorage so the existing render
-  /// paths (including the pre-paint theme script) keep working unchanged.
+  // 拉取服务端共享偏好并灌进 localStorage，
+  // 这样已有的渲染路径（包括首帧前的主题脚本）无需任何改动。
+  // 把服务端设置灌进 localStorage，让已有的渲染/预绘制逻辑无需改动。
   async function syncSettingsFromServer() {
     try {
       const settings = await api('/api/settings');
 
-      // Seed the masonry layouts *before* anything can render, otherwise the
-      // first paint derives a fresh arrangement and (worse) caches it locally.
+      // 必须在任何渲染发生之前灌入瀑布流版式，
+      // 否则首帧会重新推导一套排版，甚至把它缓存回本地。
       for (const [boardId, layout] of Object.entries(settings.layouts || {})) {
         if (Array.isArray(layout)) {
           localStorage.setItem(`tabnest.layout.${boardId}`, JSON.stringify(layout));
@@ -434,8 +465,8 @@
         localStorage.setItem('tabnest.board', String(activeBoard));
       }
 
-      // One-time migration for devices that still hold the old local-only
-      // preferences: push whatever the server does not have yet.
+      // 一次性迁移：把只存在于本地的旧偏好补推到服务端，
+      // 服务端已有的字段不动。
       const missing = {};
       if (!settings.theme) {
         const value = localStorage.getItem('tabnest.theme');
@@ -461,14 +492,15 @@
           const layout = JSON.parse(localStorage.getItem(key));
           if (Array.isArray(layout)) queueLayout(boardId, layout);
         } catch {
-          /* ignore corrupt entries */
+          /* 跳过无法解析的脏数据 */
         }
       }
     } catch {
-      /* preferences are optional; local storage still works */
+      /* 偏好是可选能力，服务端不可用时本地存储仍然有效 */
     }
   }
 
+  // 打开外观浮层，位置贴近触发按钮且不超出视口。
   function openAppearance(anchor) {
     if (state.appearanceEl) {
       closeAppearance();
@@ -560,6 +592,7 @@
     syncAppearancePanel();
   }
 
+  // 关闭外观浮层并移除全局点击监听。
   function closeAppearance() {
     const element = state.appearanceEl;
     if (!element) return;
@@ -568,6 +601,7 @@
     state.appearanceEl = null;
   }
 
+  // 把当前模式/配色/列数同步到浮层的高亮与 aria-pressed。
   function syncAppearancePanel() {
     const element = state.appearanceEl;
     if (!element) return;
@@ -590,9 +624,10 @@
   }
 
   /* ----------------------------------------------------------
-     Data loading
+     数据加载
      ---------------------------------------------------------- */
 
+  // 拉取全量数据、恢复上次选中的面板，然后重绘。
   async function loadState() {
     const data = await api('/api/state');
     state.boards = Array.isArray(data.boards) ? data.boards : [];
@@ -608,6 +643,7 @@
     render();
   }
 
+  // 静默刷新：失败时只提示，未登录场景交给登录层处理。
   async function refresh() {
     try {
       await loadState();
@@ -616,6 +652,7 @@
     }
   }
 
+  // 记住当前面板：本地立即生效，同时异步写回服务端。
   function persistActive() {
     if (state.activeId) {
       localStorage.setItem('tabnest.board', String(state.activeId));
@@ -623,10 +660,12 @@
     }
   }
 
+  // 取当前选中的面板对象。
   function activeBoard() {
     return state.boards.find((board) => board.id === state.activeId) || null;
   }
 
+  // 在全部面板中按 ID 查分组。
   function findColumn(columnId) {
     for (const board of state.boards) {
       for (const column of board.columns) {
@@ -636,6 +675,7 @@
     return null;
   }
 
+  // 在全部面板中按 ID 查书签（含所属面板与分组）。
   function findLink(linkId) {
     for (const board of state.boards) {
       for (const column of board.columns) {
@@ -647,14 +687,16 @@
   }
 
   /* ----------------------------------------------------------
-     Rendering
+     渲染
      ---------------------------------------------------------- */
 
+  // 整体重绘：侧边栏 + 主区域。
   function render() {
     renderSidebar();
     renderMain();
   }
 
+  // 渲染左侧面板列表，并显示每个面板的书签总数。
   function renderSidebar() {
     els.boardList.innerHTML = state.boards
       .map((board) => {
@@ -673,13 +715,16 @@
     }
   }
 
+  // 瀑布流目标列宽与列间距，用于把窗口宽度换算成列数。
   const MASONRY_TARGET = 204;
   const MASONRY_GAP = 8;
 
+  // 每个面板的版式独立存在 localStorage 的一个 key 下。
   function layoutStorageKey(boardId) {
     return `tabnest.layout.${boardId}`;
   }
 
+  // 计算实际视觉列数：窄屏固定 1 列，手动设置优先，否则按宽度估算。
   function visualColumnCount() {
     if (window.matchMedia('(max-width: 900px)').matches) return 1;
     if (state.columns !== 'auto') {
@@ -690,10 +735,12 @@
     return Math.max(1, Math.floor((width + MASONRY_GAP) / (MASONRY_TARGET + MASONRY_GAP)));
   }
 
+  // 估算分组高度，仅用于把新分组放进当前最矮的一列。
   function estimateColumnHeight(column) {
     return 44 + (column?.links?.length || 0) * 25;
   }
 
+  // 读取并校验面板版式；列数变化时按最矮列重新分配，不丢原有顺序。
   function ensureBoardLayout(board) {
     const count = visualColumnCount();
     const byId = new Map(board.columns.map((column) => [column.id, column]));
@@ -719,9 +766,9 @@
           });
       });
     } else if (saved) {
-      // Fewer/more visual columns than when the layout was saved (narrow
-      // window, zoom, changed setting): reflow the saved columns instead of
-      // discarding the arrangement, and keep the canonical copy untouched.
+      // 保存版式时的列数与当前不同（窗口变窄、缩放、改了列数设置）：
+      // 把已保存的分组按最矮列重新分配，而不是丢弃原有排序；
+      // 同时保持 localStorage 里的“标准版式”不被这次重排覆盖。
       const flat = saved
         .flat()
         .map(Number)
@@ -763,8 +810,7 @@
       visual[target].push(column.id);
     }
 
-    // Only persist when the column count still matches the saved layout; a
-    // reflowed view must not overwrite the canonical arrangement.
+    // 只有列数与保存时一致才写回；重排后的视图不能覆盖标准版式。
     if (!saved || saved.length === count) {
       const serialized = JSON.stringify(visual);
       if (localStorage.getItem(layoutStorageKey(board.id)) !== serialized) {
@@ -774,6 +820,7 @@
     return visual;
   }
 
+  // 渲染主区域：搜索态、空态，或瀑布流面板。
   function renderMain() {
     if (state.query.trim()) {
       renderSearch();
@@ -830,6 +877,7 @@
       <button class="column-add" data-act="new-column" data-board-id="${board.id}">${SVG.plus}<span>新建分组</span></button>`;
   }
 
+  // 渲染单个分组卡片（标题栏 + 书签列表 + 添加按钮）。
   function renderColumn(column) {
     return `<section class="column ${categoryColor(column.name)}" data-column-id="${column.id}">
       <header class="column-head" draggable="true" data-column-id="${column.id}" title="拖动排序" aria-label="拖动排序：${attr(column.name)}">
@@ -848,11 +896,12 @@
     </section>`;
   }
 
+  // 渲染书签卡片；搜索结果里传 options.draggable=false 关闭拖拽。
   function renderLink(link, options = {}) {
     const draggable = options.draggable !== false;
     const letter = initial(link.title || link.url);
-    // Imported bookmarks carry no icon URL; fall back to the page URL so the
-    // server can resolve <link rel="icon"> (or /favicon.ico) and cache it.
+    // 导入的书签没有图标地址，退回用页面 URL：
+    // 服务端会去解析 <link rel="icon">（或 /favicon.ico）并缓存结果。
     const iconSrc = link.icon || link.url;
     const icon = iconSrc
       ? `<img src="/api/favicon?u=${encodeURIComponent(iconSrc)}" alt="" loading="lazy">`
@@ -875,6 +924,7 @@
     </article>`;
   }
 
+  // 全量模糊搜索：标题/网址/备注/分组名/面板名都参与匹配，结果按面板分组。
   function renderSearch() {
     const rawQuery = state.query.trim();
     const query = rawQuery.toLowerCase();
@@ -934,6 +984,7 @@
       .join('')}</div>`;
   }
 
+  // 一个面板都没有时的欢迎页。
   function renderWelcome() {
     document.title = 'Tabnest · 个人书签面板';
     els.boardView.classList.remove('search-mode');
@@ -952,9 +1003,10 @@
   }
 
   /* ----------------------------------------------------------
-     Navigation
+     导航
      ---------------------------------------------------------- */
 
+  // 切换面板：清空搜索、记住选择、关闭移动端侧栏。
   function selectBoard(boardId) {
     if (!boardId) return;
     state.activeId = boardId;
@@ -965,27 +1017,31 @@
     render();
   }
 
+  // 清空搜索并回到普通视图。
   function clearSearch() {
     state.query = '';
     els.search.value = '';
     renderMain();
   }
 
+  // 开关移动端侧边栏（传入 force 可强制指定状态）。
   function toggleSidebar(force) {
     const open = typeof force === 'boolean' ? force : !els.sidebar.classList.contains('open');
     els.sidebar.classList.toggle('open', open);
     els.scrim.classList.toggle('show', open);
   }
 
+  // 关闭移动端侧边栏及其遮罩。
   function closeSidebar() {
     els.sidebar.classList.remove('open');
     els.scrim.classList.remove('show');
   }
 
   /* ----------------------------------------------------------
-     Inline create forms
+     新建表单
      ---------------------------------------------------------- */
 
+  // 新建面板：弹窗取名 -> 调接口 -> 刷新并切到新面板。
   async function startNewBoard() {
     const name = await promptDialog({
       title: '新建面板',
@@ -1004,6 +1060,7 @@
     }
   }
 
+  // 在指定面板下新建分组。
   async function startNewColumn(boardId) {
     const board = state.boards.find((item) => item.id === boardId);
     if (!board) return;
@@ -1023,9 +1080,10 @@
   }
 
   /* ----------------------------------------------------------
-     Menus
+     菜单
      ---------------------------------------------------------- */
 
+  // 关闭当前打开的上下文菜单。
   function closeMenu() {
     if (state.menuEl) {
       if (state.menuEl._outside) document.removeEventListener('click', state.menuEl._outside);
@@ -1035,6 +1093,7 @@
     $$('[data-menu-open]').forEach((el) => delete el.dataset.menuOpen);
   }
 
+  // 通用上下文菜单：按锚点定位，点击外部自动关闭。
   function openMenu(anchor, items) {
     const wasOpen = anchor.dataset.menuOpen === '1';
     closeAppearance();
@@ -1086,6 +1145,7 @@
     window.setTimeout(() => document.addEventListener('click', outside), 0);
   }
 
+  // 面板菜单：重命名 / 删除。
   function openBoardMenu(anchor, boardId) {
     const board = state.boards.find((item) => item.id === boardId);
     if (!board) return;
@@ -1129,6 +1189,7 @@
     ]);
   }
 
+  // 分组菜单：添加书签 / 重命名 / 打开全部 / 删除。
   function openColumnMenu(anchor, columnId) {
     const board = activeBoard();
     const column = board?.columns.find((item) => item.id === columnId);
@@ -1178,6 +1239,7 @@
     ]);
   }
 
+  // 打开分组内全部书签；数量多时先确认，避免被浏览器拦截。
   async function openAll(column) {
     if (!column.links.length) {
       toast('这个分组里还没有书签');
@@ -1197,9 +1259,10 @@
   }
 
   /* ----------------------------------------------------------
-     Dialogs
+     弹窗
      ---------------------------------------------------------- */
 
+  // 把弹窗 HTML 挂到遮罩层，并先关掉菜单与外观浮层。
   function mountModal(html) {
     els.modalLayer.innerHTML = html;
     els.modalLayer.hidden = false;
@@ -1207,11 +1270,13 @@
     closeAppearance();
   }
 
+  // 关闭弹窗并清空内容。
   function closeModal() {
     els.modalLayer.hidden = true;
     els.modalLayer.innerHTML = '';
   }
 
+  // 给弹窗内所有 [data-close] 与遮罩绑定关闭行为。
   function wireModalClose() {
     $$('[data-close]', els.modalLayer).forEach((button) => {
       button.addEventListener('click', closeModal);
@@ -1221,6 +1286,7 @@
     });
   }
 
+  // 单输入框弹窗，返回输入值；取消时返回 null。
   function promptDialog({ title, label, value = '', hint = '', confirmText = '保存' }) {
     return new Promise((resolve) => {
       mountModal(`<form class="modal" role="dialog" aria-modal="true">
@@ -1264,6 +1330,7 @@
     });
   }
 
+  // 确认弹窗，返回布尔值。
   function confirmDialog({ title, message, confirmText = '确认', danger = true }) {
     return new Promise((resolve) => {
       mountModal(`<div class="modal" role="dialog" aria-modal="true">
@@ -1295,6 +1362,7 @@
     });
   }
 
+  // 生成「面板 -> 分组」两级下拉选项，供书签弹窗选择归属。
   function columnOptions(selectedId) {
     return state.boards
       .filter((board) => board.columns.length)
@@ -1309,6 +1377,7 @@
       .join('');
   }
 
+  // 添加/编辑书签弹窗：失焦自动抓取标题与图标，保存时提交整份表单。
   function openLinkDialog(options = {}) {
     const found = options.linkId ? findLink(options.linkId) : null;
     if (options.linkId && !found) {
@@ -1399,7 +1468,7 @@
         iconState = { icon: meta.icon || null, url: meta.url || normalized };
         updatePreview(iconState.icon, meta.title || hostOf(normalized), iconState.url);
       } catch (error) {
-        /* metadata is best effort; saving will retry on the server */
+        /* 元数据抓取失败不影响流程，保存时服务端会再试一次 */
       }
     }
 
@@ -1450,6 +1519,7 @@
     });
   }
 
+  // 删除书签，先二次确认。
   async function deleteLink(linkId) {
     const found = findLink(linkId);
     if (!found) return;
@@ -1464,6 +1534,7 @@
     toast('书签已删除');
   }
 
+  // 重命名分组（菜单与快捷键共用）。
   async function renameColumn(columnId) {
     const found = findColumn(columnId);
     if (!found) return;
@@ -1479,9 +1550,10 @@
   }
 
   /* ----------------------------------------------------------
-     Import / export
+     导入 / 导出
      ---------------------------------------------------------- */
 
+  // 导入/导出弹窗：两个下载链接 + 文件选择/拖放区域。
   function openImportDialog() {
     mountModal(`<div class="modal" role="dialog" aria-modal="true">
       <div class="modal-head">
@@ -1538,6 +1610,7 @@
     });
   }
 
+  // 读取本地文件并发给后端；JSON 与 HTML 走不同接口。
   async function importFile(file) {
     const errorEl = $('#import-error');
     const drop = $('#import-drop');
@@ -1551,11 +1624,11 @@
       const result = await api(endpoint, { method: 'POST', raw: text });
       const stats = result.stats || {};
       closeModal();
-      // Settings (layouts included) must be seeded before the first render,
-      // otherwise the freshly imported board paints with an auto arrangement.
+      // 设置（含版式）必须在首次渲染前灌好，
+      // 否则刚导入的面板会先按自动排列画一遍。
       await syncSettingsFromServer();
       await refresh();
-      // Jump to the first imported board so the restored layout is on screen.
+      // 自动切到第一个导入的面板，让恢复出来的版式立刻可见。
       const firstImported = Array.isArray(result.boards) ? result.boards[0] : null;
       if (firstImported && state.boards.some((board) => board.id === firstImported)) {
         state.activeId = firstImported;
@@ -1573,15 +1646,17 @@
   }
 
   /* ----------------------------------------------------------
-     Drag & drop
+     拖放
      ---------------------------------------------------------- */
 
+  // 清除所有拖放高亮类。
   function clearIndicators() {
     $$('.drop-before, .drop-after, .drop-active, .drop-left, .drop-right, .drop-empty').forEach((el) => {
       el.classList.remove('drop-before', 'drop-after', 'drop-active', 'drop-left', 'drop-right', 'drop-empty');
     });
   }
 
+  // 拖拽结束后的统一清理：停自动滚动、清高亮、清状态。
   function cleanupDrag() {
     stopAutoScroll();
     clearIndicators();
@@ -1597,6 +1672,7 @@
     drag.lastY = null;
   }
 
+  // 停止拖拽时的自动滚动动画帧。
   function stopAutoScroll() {
     if (drag.scrollFrame) {
       window.cancelAnimationFrame(drag.scrollFrame);
@@ -1604,11 +1680,13 @@
     }
   }
 
+  // 拖拽书签/分组时启动边缘自动滚动（面板排序不需要）。
   function startAutoScroll() {
     if (drag.scrollFrame || !drag.payload || drag.payload.type === 'board') return;
     drag.scrollFrame = window.requestAnimationFrame(autoScrollTick);
   }
 
+  // 每帧根据指针离容器边缘的距离计算滚动速度。
   function autoScrollTick() {
     drag.scrollFrame = 0;
     if (!drag.payload || drag.lastY === null) return;
@@ -1638,6 +1716,7 @@
     }
   }
 
+  // 自动滚动后指针下的元素会变，这里按坐标重新判定落点。
   function refreshDragTargetAtPoint(x, y) {
     if (!drag.payload || drag.payload.type === 'board') return;
     const node = document.elementFromPoint(x, y);
@@ -1681,6 +1760,7 @@
     }
   }
 
+  // 根据指针 Y 坐标算出应插入到第几张卡片之前。
   function insertionIndex(body, clientY) {
     const cards = Array.from(body.querySelectorAll('.link-card')).filter((card) => card !== drag.el);
     for (let index = 0; index < cards.length; index += 1) {
@@ -1690,6 +1770,7 @@
     return cards.length;
   }
 
+  // 拖拽开始：区分书签 / 分组 / 面板三种载荷。
   function onDragStart(event) {
     const card = event.target.closest('.link-card');
     const head = event.target.closest('.column-head');
@@ -1729,7 +1810,7 @@
       try {
         event.dataTransfer.setDragImage(column, 24, 18);
       } catch (error) {
-        /* not supported everywhere */
+        /* 部分浏览器不支持 setDragImage，忽略即可 */
       }
       startAutoScroll();
       return;
@@ -1748,6 +1829,7 @@
     }
   }
 
+  // 拖拽经过：阻止默认行为并画出插入位置提示。
   function onDragOver(event) {
     if (!drag.payload) return;
     drag.lastX = event.clientX;
@@ -1815,6 +1897,7 @@
     }
   }
 
+  // 放下：先本地重排保证即时反馈，再写回服务端。
   async function onDrop(event) {
     if (!drag.payload) return;
     event.preventDefault();
@@ -1875,6 +1958,7 @@
     }
   }
 
+  // 移动书签：改内存数据 -> 立即重绘 -> 提交两个分组的完整顺序。
   async function moveLink(linkId, fromColumnId, toColumnId, index) {
     const source = findColumn(fromColumnId)?.column;
     const target = findColumn(toColumnId)?.column;
@@ -1899,6 +1983,7 @@
     await api('/api/links/arrange', { method: 'PUT', body: { columns } });
   }
 
+  // 移动分组到目标分组前/后：先改版式，再按扁平顺序写回 position。
   async function moveColumn(columnId, targetId, before) {
     const board = activeBoard();
     if (!board || columnId === targetId) return;
@@ -1927,6 +2012,7 @@
     });
   }
 
+  // 把分组拖到某个视觉列顶部（空列也接受拖入）。
   async function moveColumnToVisual(columnId, visualIndex) {
     const board = activeBoard();
     if (!board) return;
@@ -1950,6 +2036,7 @@
     });
   }
 
+  // 重排面板：本地 splice 后提交完整 id 列表。
   async function moveBoard(boardId, targetId, before) {
     const fromIndex = state.boards.findIndex((board) => board.id === boardId);
     if (fromIndex === -1) return;
@@ -1970,9 +2057,10 @@
   }
 
   /* ----------------------------------------------------------
-     Actions & events
+     动作与事件绑定
      ---------------------------------------------------------- */
 
+  // 统一处理带 data-act 的按钮点击。
   async function handleAction(target) {
     const action = target.dataset.act;
     if (!action) return;
@@ -2013,6 +2101,7 @@
     }
   }
 
+  // 绑定所有静态事件：登录、快捷键、搜索、拖拽、图片兜底等。
   function bindStatic() {
     els.loginForm.addEventListener('submit', onLogin);
     $('#btn-new-board').addEventListener('click', startNewBoard);
@@ -2147,6 +2236,7 @@
     });
   }
 
+  // DOM 就绪后再启动；脚本在 body 末尾时直接执行。
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', boot);
   } else {

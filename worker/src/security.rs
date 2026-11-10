@@ -1,3 +1,5 @@
+//! Worker 的全局安全响应头与 CSRF 防护。
+
 use axum::{
     extract::Request,
     http::{header, HeaderMap, HeaderName, HeaderValue, Method},
@@ -9,8 +11,9 @@ use tabnest_core::security::{is_same_origin, OriginCheck, CSP, PERMISSIONS_POLIC
 
 use crate::error::AppError;
 
-/// Security headers for every Worker response. Static assets get the same
-/// headers through `static/_headers`, which Cloudflare applies at the edge.
+/// 给每个 Worker 响应补上安全响应头。
+///
+/// 静态资源不经过 Worker，它们的安全头由 `static/_headers` 在边缘生效。
 pub async fn headers(request: Request, next: Next) -> Response {
     let path = request.uri().path().to_string();
     let forwarded_https = request
@@ -23,6 +26,7 @@ pub async fn headers(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
 
+    // API 响应默认不缓存；图标接口自身会设置长缓存，跳过。
     if path.starts_with("/api/") && path != "/api/favicon" {
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
         headers.insert(
@@ -31,6 +35,7 @@ pub async fn headers(request: Request, next: Next) -> Response {
         );
     }
 
+    // 图标等响应可能已经自带 CSP，不覆盖。
     if !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
         headers.insert(
             header::CONTENT_SECURITY_POLICY,
@@ -65,14 +70,13 @@ pub async fn headers(request: Request, next: Next) -> Response {
     response
 }
 
-/// Workers always run behind TLS, so HSTS is added even though the inbound
-/// request object does not carry `X-Forwarded-Proto`.
+/// Workers 一定跑在 TLS 后面，所以即使入站请求没带 `X-Forwarded-Proto`，
+/// 也应当加 HSTS。保留参数是为了和原生实现保持相同签名。
 fn request_was_https(_path: &str) -> bool {
     true
 }
 
-/// Reject cross-site state-changing requests with the same rule the native
-/// server applies.
+/// 拒绝跨站的状态变更请求，规则与原生服务端完全一致。
 pub async fn csrf_guard(request: Request, next: Next) -> Result<Response, AppError> {
     let method = request.method().clone();
     if matches!(
@@ -85,7 +89,9 @@ pub async fn csrf_guard(request: Request, next: Next) -> Result<Response, AppErr
     Ok(next.run(request).await)
 }
 
+/// 从请求头组装同源校验所需的上下文。
 fn request_is_same_origin(headers: &HeaderMap) -> bool {
+    // Workers 环境默认视为 HTTPS。
     let forwarded_https = header_str(headers, "x-forwarded-proto")
         .map(|value| value.eq_ignore_ascii_case("https"))
         .unwrap_or(true);
